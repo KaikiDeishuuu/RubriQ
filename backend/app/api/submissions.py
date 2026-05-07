@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.api.common import load_submission_detail, serialize_submission_detail
 from app.api.deps import get_db
 from app.models import Submission, SubmissionStatus
-from app.schemas.submission import ProcessResponse, SubmissionDetail, SubmissionSummary
+from app.schemas.submission import ProcessResponse, SubmissionDetail
 from app.storage.local import get_storage_service
 from app.workers.tasks import process_submission_task
 
@@ -26,6 +26,8 @@ def get_submission_detail(submission_id: int, session: Session = Depends(get_db)
 @router.post("/{submission_id}/process", response_model=ProcessResponse)
 def start_submission_processing(submission_id: int, session: Session = Depends(get_db)):
     submission = _load_submission_or_404(session, submission_id)
+    if submission.batch_id is not None and not submission.split_confirmed:
+        raise HTTPException(status_code=409, detail="Batch submission split must be confirmed before grading")
     if submission.status == SubmissionStatus.processing.value:
         return ProcessResponse(submission_id=submission.id, status=submission.status)
     submission.status = SubmissionStatus.processing.value

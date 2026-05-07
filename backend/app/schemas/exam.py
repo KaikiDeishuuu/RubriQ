@@ -123,6 +123,9 @@ class ExamResultRow(BaseSchema):
     status: str
     total_score: float
     needs_human_review: bool = False
+    source_mode: str | None = None
+    split_confidence: float | None = None
+    split_confirmed: bool = False
     question_scores: dict[str, float] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime

@@ -1,5 +1,7 @@
 export type SubmissionStatus = 'uploaded' | 'processing' | 'rendering' | 'extracting' | 'grading' | 'graded' | 'needs_review' | 'failed'
 export type ConfidenceLevel = 'high' | 'medium' | 'low'
+export type BatchUploadMode = 'zip' | 'combined_fixed' | 'combined_auto'
+export type BatchStatus = 'uploaded' | 'splitting' | 'needs_split_review' | 'split_ready' | 'materializing' | 'ready_for_grading' | 'grading' | 'completed' | 'completed_with_errors' | 'failed'
 
 export interface ExamListItem {
   id: number
@@ -65,6 +67,8 @@ export interface ExamDetail {
 export interface SubmissionSummary {
   id: number
   exam_id: number
+  batch_id: number | null
+  batch_candidate_id: number | null
   student_name: string | null
   student_id: string | null
   original_pdf_path: string
@@ -72,6 +76,9 @@ export interface SubmissionSummary {
   total_score: string | number
   raw_extraction_response: string | null
   error_message: string | null
+  source_mode: string | null
+  split_confidence: number | null
+  split_confirmed: boolean
   created_at: string
   updated_at: string
 }
@@ -81,6 +88,7 @@ export interface SubmissionPage {
   submission_id: number
   page_no: number
   image_path: string
+  page_hash: string | null
   extracted_text: string | null
   raw_ai_response: string | null
   created_at: string
@@ -126,6 +134,86 @@ export interface SubmissionDetail extends SubmissionSummary {
   answers: Answer[]
 }
 
+export interface BatchPage {
+  id: number
+  batch_id: number
+  page_no: number
+  image_path: string
+  page_hash: string
+  extracted_text: string | null
+  header_extraction_json: Record<string, unknown> | null
+  raw_ai_response: string | null
+  error_message: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface BatchSplitCandidate {
+  id: number
+  batch_id: number
+  candidate_index: number
+  start_page: number
+  end_page: number
+  student_name: string | null
+  student_id: string | null
+  split_confidence: number
+  needs_review: boolean
+  review_notes: string | null
+  confirmed: boolean
+  source_filename: string | null
+  source_storage_path: string | null
+  error_message: string | null
+  submission_id: number | null
+  created_at: string
+  updated_at: string
+}
+
+export interface SubmissionBatchDetail {
+  id: number
+  exam_id: number
+  mode: BatchUploadMode
+  status: BatchStatus
+  source_filename: string
+  source_storage_path: string
+  pages_per_submission: number | null
+  total_pages: number | null
+  split_version: number
+  raw_split_extraction_response: Record<string, unknown> | null
+  error_message: string | null
+  created_at: string
+  updated_at: string
+  pages: BatchPage[]
+  candidates: BatchSplitCandidate[]
+  submissions: SubmissionSummary[]
+}
+
+export interface BatchUploadResponse {
+  batch: SubmissionBatchDetail
+}
+
+export interface BatchCandidateUpdatePayload {
+  id?: number | null
+  candidate_index?: number | null
+  start_page: number
+  end_page: number
+  student_name?: string | null
+  student_id?: string | null
+  review_notes?: string | null
+  confirmed: boolean
+}
+
+export interface BatchConfirmResponse {
+  batch: SubmissionBatchDetail
+  created_submission_count: number
+  failed_candidate_count: number
+}
+
+export interface BatchStartGradingResponse {
+  batch_id: number
+  queued_submission_count: number
+  status: BatchStatus
+}
+
 export interface ExamResultRow {
   submission_id: number
   student_name: string | null
@@ -133,6 +221,9 @@ export interface ExamResultRow {
   status: SubmissionStatus
   total_score: number
   needs_human_review: boolean
+  source_mode?: string | null
+  split_confidence?: number | null
+  split_confirmed?: boolean
   question_scores: Record<string, number>
   created_at: string
   updated_at: string

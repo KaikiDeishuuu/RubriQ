@@ -18,6 +18,8 @@ class SubmissionCreate(BaseSchema):
 class SubmissionSummary(BaseSchema):
     id: int
     exam_id: int
+    batch_id: int | None = None
+    batch_candidate_id: int | None = None
     student_name: str | None = None
     student_id: str | None = None
     original_pdf_path: str
@@ -25,6 +27,9 @@ class SubmissionSummary(BaseSchema):
     total_score: Decimal
     raw_extraction_response: str | None = None
     error_message: str | None = None
+    source_mode: str | None = None
+    split_confidence: float | None = None
+    split_confirmed: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -34,6 +39,7 @@ class SubmissionPageRead(BaseSchema):
     submission_id: int
     page_no: int
     image_path: str
+    page_hash: str | None = None
     extracted_text: str | None = None
     raw_ai_response: str | None = None
     created_at: datetime

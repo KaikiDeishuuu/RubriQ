@@ -1,15 +1,33 @@
-from app.models.entities import Answer, AnswerRubricResult, Exam, ExamFile, Question, RubricItem, Submission, SubmissionPage, User
-from app.models.enums import ConfidenceLevel, SubmissionStatus
+from app.models.entities import (
+    Answer,
+    AnswerRubricResult,
+    BatchPage,
+    BatchSplitCandidate,
+    Exam,
+    ExamFile,
+    Question,
+    RubricItem,
+    Submission,
+    SubmissionBatch,
+    SubmissionPage,
+    User,
+)
+from app.models.enums import BatchStatus, BatchUploadMode, ConfidenceLevel, SubmissionStatus
 
 __all__ = [
     "Answer",
     "AnswerRubricResult",
+    "BatchPage",
+    "BatchSplitCandidate",
+    "BatchStatus",
+    "BatchUploadMode",
     "ConfidenceLevel",
     "Exam",
     "ExamFile",
     "Question",
     "RubricItem",
     "Submission",
+    "SubmissionBatch",
     "SubmissionPage",
     "SubmissionStatus",
     "User",

@@ -28,7 +28,7 @@ from app.models import (
 )
 from app.schemas.ai import ExtractedQuestion, GradingResult, RubricParseResult, StudentExtractionResult
 from app.services.llm import call_structured_json
-from app.services.pdf import RenderedPage, render_pdf_to_images
+from app.services.pdf import RenderedPage, hash_file, render_pdf_to_images
 from app.storage.local import get_storage_service
 from app.utils.score import clamp_score
 
@@ -267,6 +267,7 @@ def process_submission(session: Session, submission_id: int) -> Submission:
                 submission_id=submission.id,
                 page_no=rendered_page.page_no,
                 image_path=storage.relative_path_for(rendered_page.image_path),
+                page_hash=hash_file(rendered_page.image_path),
                 extracted_text=rendered_page.extracted_text,
                 raw_ai_response=None,
             )

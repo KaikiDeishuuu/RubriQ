@@ -36,6 +36,20 @@ class StudentExtractionResult(BaseSchema):
     answers: list[ExtractedStudentAnswer] = Field(default_factory=list)
 
 
+class PageHeaderField(BaseSchema):
+    value: str | int | None = None
+    confidence: float = 0.0
+
+
+class PageHeaderExtraction(BaseSchema):
+    student_name: PageHeaderField = Field(default_factory=PageHeaderField)
+    student_id: PageHeaderField = Field(default_factory=PageHeaderField)
+    quiz_title: PageHeaderField = Field(default_factory=PageHeaderField)
+    page_number: PageHeaderField = Field(default_factory=PageHeaderField)
+    is_first_page_confidence: float = 0.0
+    overall_confidence: float = 0.0
+
+
 class GradingEvaluationItem(BaseSchema):
     rubric_item_id: int | str
     rubric_item: str

@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from sqlalchemy import Boolean, ForeignKey, Integer, JSON, Numeric, String, Text
+from sqlalchemy import Boolean, Float, ForeignKey, Integer, JSON, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin
-from app.models.enums import ConfidenceLevel, SubmissionStatus
+from app.models.enums import BatchStatus, ConfidenceLevel, SubmissionStatus
 
 
 class User(Base, TimestampMixin):
@@ -42,6 +42,86 @@ class Exam(Base, TimestampMixin):
         cascade="all, delete-orphan",
         order_by="Submission.created_at.desc()",
     )
+    batches: Mapped[list["SubmissionBatch"]] = relationship(
+        back_populates="exam",
+        cascade="all, delete-orphan",
+        order_by="SubmissionBatch.created_at.desc()",
+    )
+
+
+class SubmissionBatch(Base, TimestampMixin):
+    __tablename__ = "submission_batches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    exam_id: Mapped[int] = mapped_column(ForeignKey("exams.id", ondelete="CASCADE"), nullable=False)
+    mode: Mapped[str] = mapped_column(String(50), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default=BatchStatus.uploaded.value)
+    source_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_storage_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    pages_per_submission: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_pages: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    split_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    raw_split_extraction_response: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    exam: Mapped[Exam] = relationship(back_populates="batches")
+    pages: Mapped[list["BatchPage"]] = relationship(
+        back_populates="batch",
+        cascade="all, delete-orphan",
+        order_by="BatchPage.page_no.asc()",
+    )
+    candidates: Mapped[list["BatchSplitCandidate"]] = relationship(
+        back_populates="batch",
+        cascade="all, delete-orphan",
+        order_by="BatchSplitCandidate.candidate_index.asc()",
+    )
+    submissions: Mapped[list["Submission"]] = relationship(back_populates="batch")
+
+
+class BatchPage(Base, TimestampMixin):
+    __tablename__ = "batch_pages"
+    __table_args__ = (UniqueConstraint("batch_id", "page_no", name="uq_batch_pages_batch_page_no"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    batch_id: Mapped[int] = mapped_column(ForeignKey("submission_batches.id", ondelete="CASCADE"), nullable=False)
+    page_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    image_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    page_hash: Mapped[str] = mapped_column(String(128), nullable=False)
+    extracted_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    header_extraction_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    raw_ai_response: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    batch: Mapped[SubmissionBatch] = relationship(back_populates="pages")
+
+
+class BatchSplitCandidate(Base, TimestampMixin):
+    __tablename__ = "batch_split_candidates"
+    __table_args__ = (
+        UniqueConstraint("batch_id", "candidate_index", name="uq_batch_candidates_batch_index"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    batch_id: Mapped[int] = mapped_column(ForeignKey("submission_batches.id", ondelete="CASCADE"), nullable=False)
+    candidate_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    start_page: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_page: Mapped[int] = mapped_column(Integer, nullable=False)
+    student_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    student_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    split_confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    needs_review: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    review_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    confirmed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    source_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source_storage_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    batch: Mapped[SubmissionBatch] = relationship(back_populates="candidates")
+    submission: Mapped["Submission | None"] = relationship(back_populates="batch_candidate", uselist=False)
+
+    @property
+    def submission_id(self) -> int | None:
+        return self.submission.id if self.submission is not None else None
 
 
 class ExamFile(Base, TimestampMixin):
@@ -96,6 +176,12 @@ class Submission(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     exam_id: Mapped[int] = mapped_column(ForeignKey("exams.id", ondelete="CASCADE"), nullable=False)
+    batch_id: Mapped[int | None] = mapped_column(ForeignKey("submission_batches.id", ondelete="SET NULL"), nullable=True)
+    batch_candidate_id: Mapped[int | None] = mapped_column(
+        ForeignKey("batch_split_candidates.id", ondelete="SET NULL"),
+        nullable=True,
+        unique=True,
+    )
     student_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     student_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     original_pdf_path: Mapped[str] = mapped_column(String(1024), nullable=False)
@@ -103,8 +189,16 @@ class Submission(Base, TimestampMixin):
     total_score: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, default=Decimal("0"))
     raw_extraction_response: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_mode: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    split_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    split_confirmed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     exam: Mapped[Exam] = relationship(back_populates="submissions")
+    batch: Mapped[SubmissionBatch | None] = relationship(back_populates="submissions", foreign_keys=[batch_id])
+    batch_candidate: Mapped[BatchSplitCandidate | None] = relationship(
+        back_populates="submission",
+        foreign_keys=[batch_candidate_id],
+    )
     pages: Mapped[list["SubmissionPage"]] = relationship(
         back_populates="submission",
         cascade="all, delete-orphan",
@@ -124,6 +218,7 @@ class SubmissionPage(Base, TimestampMixin):
     submission_id: Mapped[int] = mapped_column(ForeignKey("submissions.id", ondelete="CASCADE"), nullable=False)
     page_no: Mapped[int] = mapped_column(Integer, nullable=False)
     image_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    page_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
     extracted_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_ai_response: Mapped[str | None] = mapped_column(Text, nullable=True)
 

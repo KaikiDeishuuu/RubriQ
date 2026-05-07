@@ -3,7 +3,6 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.api.common import load_submission_detail, serialize_submission_detail
 from app.api.deps import get_db
 from app.models import Answer
 from app.schemas.submission import AnswerDetail, SubmissionOverride

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
 import fitz
+from PIL import Image
 
 
 @dataclass(slots=True)
@@ -39,3 +42,43 @@ def render_pdf_to_images(pdf_path: Path, output_dir: Path, dpi: int = 300) -> li
                 stale_image_path.unlink()
 
         return rendered_pages
+
+
+def get_pdf_page_count(pdf_path: Path) -> int:
+    with fitz.open(str(pdf_path)) as document:
+        return document.page_count
+
+
+def split_pdf_pages(pdf_path: Path, page_ranges: Iterable[tuple[int, int]], output_dir: Path) -> list[Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_paths: list[Path] = []
+    with fitz.open(str(pdf_path)) as source_document:
+        for index, (start_page, end_page) in enumerate(page_ranges, start=1):
+            output_path = output_dir / f"submission-{index:03d}-pages-{start_page}-{end_page}.pdf"
+            with fitz.open() as target_document:
+                target_document.insert_pdf(
+                    source_document,
+                    from_page=start_page - 1,
+                    to_page=end_page - 1,
+                )
+                target_document.save(str(output_path))
+            output_paths.append(output_path)
+    return output_paths
+
+
+def hash_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file_obj:
+        for chunk in iter(lambda: file_obj.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def crop_top_region(image_path: Path, output_path: Path, ratio: float = 0.28) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with Image.open(image_path) as image:
+        width, height = image.size
+        crop_height = max(1, int(height * ratio))
+        cropped = image.crop((0, 0, width, crop_height))
+        cropped.save(output_path)
+    return output_path

@@ -5,8 +5,8 @@ from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.models import Answer, AnswerRubricResult, Exam, Question, RubricItem, Submission
-from app.schemas.exam import ExamDetail, ExamFileRead, ExamListItem, QuestionRead, RubricItemRead
+from app.models import Answer, Exam, Question, RubricItem, Submission
+from app.schemas.exam import ExamDetail, ExamListItem, QuestionRead, RubricItemRead
 from app.schemas.submission import (
     AnswerDetail,
     AnswerRubricResultRead,

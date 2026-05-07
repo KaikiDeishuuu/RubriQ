@@ -200,6 +200,11 @@ export function BatchResultsPage() {
                     <td className="px-5 py-4">
                       <div className="font-semibold text-ink-950">{row.student_name || '未知学生'}</div>
                       <div className="mt-1 text-xs text-ink-700">{row.student_id || '暂无学号'}</div>
+                      {row.source_mode ? (
+                        <div className="mt-2 text-[11px] font-semibold text-slateBlue-500">
+                          {formatSourceMode(row.source_mode)}{row.split_confidence !== null && row.split_confidence !== undefined ? ` · 拆分置信度 ${Math.round(row.split_confidence * 100)}%` : ''}
+                        </div>
+                      ) : null}
                     </td>
                     <td className="px-5 py-4">
                       <StatusBadge status={row.status} />
@@ -266,6 +271,19 @@ function Metric({ label, value }: { label: string; value: string }) {
       <div className="mt-2 font-display text-3xl text-ink-950">{value}</div>
     </div>
   )
+}
+
+function formatSourceMode(mode: string): string {
+  switch (mode) {
+    case 'zip':
+      return 'ZIP 批量'
+    case 'combined_fixed':
+      return '固定页拆分'
+    case 'combined_auto':
+      return '自动拆分'
+    default:
+      return mode
+  }
 }
 
 function Message({ message, tone = 'neutral' }: { message: string; tone?: 'neutral' | 'error' }) {

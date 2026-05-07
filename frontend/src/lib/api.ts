@@ -1,6 +1,11 @@
 import type {
   Answer,
   AnswerRubricResult,
+  BatchCandidateUpdatePayload,
+  BatchConfirmResponse,
+  BatchStartGradingResponse,
+  BatchUploadMode,
+  BatchUploadResponse,
   ConfidenceLevel,
   ExamCreatePayload,
   ExamDetail,
@@ -12,6 +17,7 @@ import type {
   QuestionUpdatePayload,
   RubricItemCreatePayload,
   RubricItemUpdatePayload,
+  SubmissionBatchDetail,
   SubmissionDetail,
   SubmissionOverridePayload,
   SubmissionSummary,
@@ -119,6 +125,58 @@ export async function updateRubricItem(itemId: number, payload: RubricItemUpdate
 export async function deleteRubricItem(itemId: number): Promise<void> {
   await request<void>(`/exams/rubric-items/${itemId}`, {
     method: 'DELETE',
+  })
+}
+
+export async function uploadBatch(
+  examId: number,
+  mode: BatchUploadMode,
+  file: File,
+  pagesPerSubmission?: number,
+): Promise<BatchUploadResponse> {
+  const formData = new FormData()
+  formData.append('mode', mode)
+  formData.append('file', file)
+  if (pagesPerSubmission !== undefined) {
+    formData.append('pages_per_submission', String(pagesPerSubmission))
+  }
+  return request<BatchUploadResponse>(`/exams/${examId}/batches/upload`, {
+    method: 'POST',
+    body: formData,
+  })
+}
+
+export async function listBatches(examId: number): Promise<SubmissionBatchDetail[]> {
+  return request<SubmissionBatchDetail[]>(`/exams/${examId}/batches`)
+}
+
+export async function getBatch(examId: number, batchId: number): Promise<SubmissionBatchDetail> {
+  return request<SubmissionBatchDetail>(`/exams/${examId}/batches/${batchId}`)
+}
+
+export async function updateBatchCandidates(
+  examId: number,
+  batchId: number,
+  candidates: BatchCandidateUpdatePayload[],
+): Promise<SubmissionBatchDetail> {
+  return request<SubmissionBatchDetail>(`/exams/${examId}/batches/${batchId}/candidates`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ candidates }),
+  })
+}
+
+export async function confirmBatchSplit(examId: number, batchId: number): Promise<BatchConfirmResponse> {
+  return request<BatchConfirmResponse>(`/exams/${examId}/batches/${batchId}/confirm-split`, {
+    method: 'POST',
+  })
+}
+
+export async function startBatchGrading(examId: number, batchId: number): Promise<BatchStartGradingResponse> {
+  return request<BatchStartGradingResponse>(`/exams/${examId}/batches/${batchId}/start-grading`, {
+    method: 'POST',
   })
 }
 

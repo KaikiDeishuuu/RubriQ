@@ -82,7 +82,7 @@ export function SubmissionReviewPage() {
   }
 
   async function handleProcess() {
-    if (!submission) {
+    if (!submission || (submission.batch_id !== null && !submission.split_confirmed)) {
       return
     }
     setProcessing(true)
@@ -127,6 +127,7 @@ export function SubmissionReviewPage() {
   const completedQuestionCount = submission?.answers.length ?? 0
   const totalQuestionCount = submission?.exam.questions.length ?? 0
   const submissionIsActive = submission ? isSubmissionActive(submission.status) : false
+  const splitLocked = Boolean(submission?.batch_id !== null && submission && !submission.split_confirmed)
   const completedQuestion = submission?.exam.questions.find((question) => answerByQuestion.has(question.id)) ?? null
   const activeQuestionIsWaiting = Boolean(submissionIsActive && activeQuestion && !activeAnswer && completedQuestion)
 
@@ -157,18 +158,19 @@ export function SubmissionReviewPage() {
             <button
               type="button"
               onClick={() => void handleProcess()}
-              disabled={processing || !submission || submissionIsActive}
+              disabled={processing || !submission || submissionIsActive || splitLocked}
               className="rounded-full bg-ink-950 px-4 py-2 text-sm font-semibold text-paper transition hover:bg-ink-800 disabled:opacity-50"
             >
-              {processing || submissionIsActive ? '处理中...' : '开始批改'}
+              {splitLocked ? '等待拆分确认' : processing || submissionIsActive ? '处理中...' : '开始批改'}
             </button>
           </div>
         }
       >
-        <div className="grid gap-4 md:grid-cols-4">
+        <div className="grid gap-4 md:grid-cols-5">
           <Metric label="学生" value={submission?.student_name || '未知'} />
           <Metric label="学号" value={submission?.student_id || '待识别'} />
           <Metric label="总分" value={formatScore(submission?.total_score ?? 0)} />
+          <Metric label="来源" value={submission?.source_mode ? `${formatSourceMode(submission.source_mode)}${submission.split_confidence !== null ? ` ${Math.round((submission.split_confidence ?? 0) * 100)}%` : ''}` : '单独上传'} />
           <div className="rounded-2xl border border-ink-900/10 bg-white px-4 py-4 shadow-sm">
             <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-ink-700">状态</div>
             <div className="mt-3">
@@ -181,6 +183,7 @@ export function SubmissionReviewPage() {
       {loading ? <Message message="正在加载答卷详情..." /> : null}
       {error ? <Message message={error} tone="error" /> : null}
       {submissionIsActive && submission ? <ProcessingWorkflow status={submission.status} /> : null}
+      {splitLocked ? <Message message="该答卷来自批量上传，必须先在拆分预览页确认页段后才能开始批改。" tone="error" /> : null}
 
       {submission ? (
         <div className="grid gap-6 xl:grid-cols-[360px_minmax(0,1fr)]">
@@ -506,6 +509,19 @@ function ProcessingWorkflow({ status }: { status: SubmissionStatus }) {
       </p>
     </div>
   )
+}
+
+function formatSourceMode(mode: string): string {
+  switch (mode) {
+    case 'zip':
+      return 'ZIP 批量'
+    case 'combined_fixed':
+      return '固定页拆分'
+    case 'combined_auto':
+      return '自动拆分'
+    default:
+      return mode
+  }
 }
 
 function Metric({ label, value }: { label: string; value: string }) {
