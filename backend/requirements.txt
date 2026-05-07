@@ -12,6 +12,7 @@ Pillow>=10.4
 celery>=5.4
 redis>=5.0
 openpyxl>=3.1
+reportlab>=4.2
 
 # dev / test
 ruff>=0.6

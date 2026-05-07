@@ -36,3 +36,69 @@ select {
 ::selection {
   background: rgba(49, 73, 178, 0.18);
 }
+
+@keyframes workflow-pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+@keyframes workflow-shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+@keyframes workflow-slide-in {
+  0% {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes workflow-check {
+  0% {
+    transform: scale(0);
+  }
+  50% {
+    transform: scale(1.2);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+.animate-workflow-pulse {
+  animation: workflow-pulse 2s ease-in-out infinite;
+}
+
+.animate-workflow-shimmer {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(49, 73, 178, 0.08) 25%,
+    rgba(49, 73, 178, 0.15) 50%,
+    rgba(49, 73, 178, 0.08) 75%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: workflow-shimmer 2s linear infinite;
+}
+
+.animate-workflow-slide-in {
+  animation: workflow-slide-in 0.4s ease-out both;
+}
+
+.animate-workflow-check {
+  animation: workflow-check 0.35s ease-out both;
+}

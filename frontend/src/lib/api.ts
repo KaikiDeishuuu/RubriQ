@@ -184,6 +184,26 @@ export async function exportResultsXlsx(examId: number): Promise<Blob> {
   return response.blob()
 }
 
+export async function exportResultsPdf(examId: number): Promise<Blob> {
+  const response = await fetch(`${API_BASE_URL}/exams/${examId}/export.pdf`)
+  if (!response.ok) {
+    throw new Error(await response.text())
+  }
+  return response.blob()
+}
+
+export async function deleteExam(examId: number): Promise<void> {
+  await request<void>(`/exams/${examId}`, { method: 'DELETE' })
+}
+
+export async function deleteRubricFile(examId: number, fileId: number): Promise<void> {
+  await request<void>(`/exams/${examId}/rubric/files/${fileId}`, { method: 'DELETE' })
+}
+
+export async function deleteSubmission(submissionId: number): Promise<void> {
+  await request<void>(`/submissions/${submissionId}`, { method: 'DELETE' })
+}
+
 export async function downloadBlob(blob: Blob, filename: string): Promise<void> {
   const url = window.URL.createObjectURL(blob)
   const link = document.createElement('a')

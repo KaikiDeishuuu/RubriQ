@@ -21,7 +21,13 @@ export function formatStatus(status: SubmissionStatus): string {
     case 'uploaded':
       return '已上传'
     case 'processing':
-      return '处理中'
+      return '准备处理'
+    case 'rendering':
+      return '渲染页面中'
+    case 'extracting':
+      return '识别答案中'
+    case 'grading':
+      return 'AI 评分中'
     case 'graded':
       return '已评分'
     case 'needs_review':
@@ -33,6 +39,10 @@ export function formatStatus(status: SubmissionStatus): string {
   }
 }
 
+export function isSubmissionActive(status: SubmissionStatus): boolean {
+  return ['processing', 'rendering', 'extracting', 'grading'].includes(status)
+}
+
 export function statusTone(status: SubmissionStatus): string {
   switch (status) {
     case 'graded':
@@ -40,6 +50,9 @@ export function statusTone(status: SubmissionStatus): string {
     case 'needs_review':
       return 'bg-gold-50 text-amber-800 ring-gold-200'
     case 'processing':
+    case 'rendering':
+    case 'extracting':
+    case 'grading':
       return 'bg-slateBlue-50 text-slateBlue-500 ring-slateBlue-100'
     case 'failed':
       return 'bg-red-50 text-red-700 ring-red-200'

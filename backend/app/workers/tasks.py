@@ -11,7 +11,8 @@ def process_submission_task(submission_id: int) -> dict[str, int | str]:
     session = SessionLocal()
     try:
         submission = session.get(Submission, submission_id)
-        if submission is not None and submission.status not in {SubmissionStatus.uploaded.value, SubmissionStatus.processing.value}:
+        reprocessable = {SubmissionStatus.uploaded.value, SubmissionStatus.processing.value, SubmissionStatus.rendering.value, SubmissionStatus.extracting.value, SubmissionStatus.grading.value}
+        if submission is not None and submission.status not in reprocessable:
             return {"submission_id": submission.id, "status": submission.status}
         submission = process_submission(session, submission_id)
         return {"submission_id": submission.id, "status": submission.status}

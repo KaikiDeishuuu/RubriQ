@@ -1,4 +1,4 @@
-export type SubmissionStatus = 'uploaded' | 'processing' | 'graded' | 'needs_review' | 'failed'
+export type SubmissionStatus = 'uploaded' | 'processing' | 'rendering' | 'extracting' | 'grading' | 'graded' | 'needs_review' | 'failed'
 export type ConfidenceLevel = 'high' | 'medium' | 'low'
 
 export interface ExamListItem {

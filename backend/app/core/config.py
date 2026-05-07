@@ -25,6 +25,32 @@ class Settings(BaseSettings):
     ai_grading_api_key: str | None = Field(default=None, alias="AI_GRADING_API_KEY")
     ai_vision_model: str = Field(default="gpt-4o", alias="AI_VISION_MODEL")
     ai_grading_model: str = Field(default="gpt-4.1", alias="AI_GRADING_MODEL")
+    ai_grading_strictness: str = Field(default="moderate", alias="AI_GRADING_STRICTNESS")
+    ai_grading_concurrency: int = Field(default=4, alias="AI_GRADING_CONCURRENCY")
+    ai_grading_global_concurrency: int = Field(default=4, alias="AI_GRADING_GLOBAL_CONCURRENCY")
+
+    @field_validator("ai_grading_strictness")
+    @classmethod
+    def _validate_strictness(cls, value: str) -> str:
+        allowed = {"strict", "moderate", "lenient"}
+        if value.lower() not in allowed:
+            raise ValueError(f"AI_GRADING_STRICTNESS must be one of {allowed}")
+        return value.lower()
+
+    @field_validator("ai_grading_concurrency")
+    @classmethod
+    def _validate_grading_concurrency(cls, value: int) -> int:
+        if value < 1 or value > 6:
+            raise ValueError("AI_GRADING_CONCURRENCY must be between 1 and 6")
+        return value
+
+    @field_validator("ai_grading_global_concurrency")
+    @classmethod
+    def _validate_grading_global_concurrency(cls, value: int) -> int:
+        if value < 1 or value > 8:
+            raise ValueError("AI_GRADING_GLOBAL_CONCURRENCY must be between 1 and 8")
+        return value
+
     api_v1_prefix: str = Field(default="/api", alias="API_V1_PREFIX")
     database_url: str = Field(
         default="postgresql+psycopg://grader:grader@localhost:5432/grader",

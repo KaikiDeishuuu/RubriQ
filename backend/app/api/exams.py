@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
@@ -15,29 +16,32 @@ from app.api.common import (
     serialize_exam_detail,
     serialize_exam_list_item,
     serialize_question,
-    serialize_rubric_item,
 )
 from app.api.deps import get_db
 from app.core.config import settings
-from app.models import Exam, ExamFile, Question, RubricItem, Submission
+from app.models import Exam, ExamFile, RubricItem, Submission
 from app.schemas.exam import (
     ExamCreate,
     ExamDetail,
     ExamListItem,
     ExamResultsResponse,
-    ExamUpdate,
-    QuestionCreate,
     QuestionRead,
     QuestionUpdate,
     RubricItemCreate,
-    RubricItemRead,
     RubricItemUpdate,
 )
 from app.schemas.submission import PageUploadResponse, SubmissionUploadResponse, SubmissionSummary
-from app.services.export import build_exam_results_csv, build_exam_results_data, build_exam_results_xlsx
+from app.services.export import (
+    build_exam_results_csv,
+    build_exam_results_data,
+    build_exam_results_pdf,
+    build_exam_results_xlsx,
+)
 from app.services.pipeline import PipelineError, parse_rubric_for_exam
 from app.storage.local import get_storage_service
 from app.utils.files import validate_pdf_upload
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/exams", tags=["exams"])
 
@@ -79,7 +83,7 @@ async def upload_rubric_pdf(
     session: Session = Depends(get_db),
 ):
     exam = _load_exam_or_404(session, exam_id)
-    await validate_pdf_upload(file)
+    await _validate_pdf_upload_or_400(file)
     data = await file.read()
     if len(data) > settings.max_upload_bytes:
         raise HTTPException(status_code=413, detail="Uploaded rubric PDF is too large")
@@ -199,7 +203,7 @@ async def upload_submissions(
     storage = get_storage_service()
     created_submissions: list[SubmissionSummary] = []
     for file in files:
-        await validate_pdf_upload(file)
+        await _validate_pdf_upload_or_400(file)
         data = await file.read()
         if len(data) > settings.max_upload_bytes:
             raise HTTPException(status_code=413, detail="Uploaded submission PDF is too large")
@@ -257,11 +261,51 @@ def export_exam_results_xlsx(exam_id: int, session: Session = Depends(get_db)):
     )
 
 
+@router.get("/{exam_id}/export.pdf")
+def export_exam_results_pdf(exam_id: int, session: Session = Depends(get_db)):
+    pdf_bytes = build_exam_results_pdf(session, exam_id)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="exam-{exam_id}-results.pdf"'},
+    )
+
+
 def _load_exam_or_404(session: Session, exam_id: int) -> Exam:
     try:
         return load_exam_detail(session, exam_id)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.delete("/{exam_id}")
+def delete_exam(exam_id: int, session: Session = Depends(get_db)):
+    exam = _load_exam_or_404(session, exam_id)
+    storage = get_storage_service()
+    for exam_file in exam.files:
+        _remove_storage_file(storage, exam_file.storage_path)
+    for submission in exam.submissions:
+        _remove_storage_file(storage, submission.original_pdf_path)
+        _remove_storage_tree(storage, f"rendered/submissions/{submission.id}")
+    _remove_storage_tree(storage, f"rendered/exams/{exam.id}")
+    session.delete(exam)
+    session.commit()
+    return {"message": f"Exam {exam_id} deleted"}
+
+
+@router.delete("/{exam_id}/rubric/files/{file_id}")
+def delete_rubric_file(exam_id: int, file_id: int, session: Session = Depends(get_db)):
+    exam = _load_exam_or_404(session, exam_id)
+    rubric_file = session.get(ExamFile, file_id)
+    if rubric_file is None or rubric_file.exam_id != exam_id:
+        raise HTTPException(status_code=404, detail="Rubric file not found")
+    storage = get_storage_service()
+    _remove_storage_file(storage, rubric_file.storage_path)
+    _remove_storage_tree(storage, f"rendered/exams/{exam_id}/rubric/{file_id}")
+    session.delete(rubric_file)
+    exam.needs_rubric_review = True
+    session.commit()
+    return {"message": f"Rubric file {file_id} deleted"}
 
 
 def _load_rubric_item_or_404(session: Session, item_id: int) -> RubricItem:
@@ -275,3 +319,24 @@ def _exam_file_to_read(exam_file: ExamFile):
     from app.schemas.exam import ExamFileRead
 
     return ExamFileRead.model_validate(exam_file)
+
+
+async def _validate_pdf_upload_or_400(file: UploadFile) -> None:
+    try:
+        await validate_pdf_upload(file)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _remove_storage_file(storage, storage_path: str) -> None:
+    try:
+        storage.delete(storage_path)
+    except Exception as exc:  # noqa: BLE001 - cleanup failures should not block API deletion
+        logger.warning("Failed to delete storage file %s: %s", storage_path, exc)
+
+
+def _remove_storage_tree(storage, storage_path: str) -> None:
+    try:
+        storage.delete_tree(storage_path)
+    except Exception as exc:  # noqa: BLE001 - cleanup failures should not block API deletion
+        logger.warning("Failed to delete storage directory %s: %s", storage_path, exc)

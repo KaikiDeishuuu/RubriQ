@@ -33,4 +33,9 @@ def render_pdf_to_images(pdf_path: Path, output_dir: Path, dpi: int = 300) -> li
                 )
             )
 
+        rendered_image_paths = {page.image_path for page in rendered_pages}
+        for stale_image_path in output_dir.glob("page-*.png"):
+            if stale_image_path not in rendered_image_paths:
+                stale_image_path.unlink()
+
         return rendered_pages

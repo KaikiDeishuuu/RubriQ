@@ -6,8 +6,8 @@ import { SectionCard } from '../components/SectionCard'
 
 export function CreateExamPage() {
   const navigate = useNavigate()
-  const [title, set考试名称] = useState('')
-  const [description, set考试说明] = useState('')
+  const [title, setExamTitle] = useState('')
+  const [description, setExamDescription] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -33,7 +33,7 @@ export function CreateExamPage() {
             <span className="text-sm font-semibold text-ink-800">考试名称</span>
             <input
               value={title}
-              onChange={(event) => set考试名称(event.target.value)}
+              onChange={(event) => setExamTitle(event.target.value)}
               required
               placeholder="例如：热力学期中小测"
               className="w-full rounded-2xl border border-ink-900/10 bg-white px-4 py-3 outline-none ring-0 transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
@@ -43,7 +43,7 @@ export function CreateExamPage() {
             <span className="text-sm font-semibold text-ink-800">考试说明</span>
             <textarea
               value={description}
-              onChange={(event) => set考试说明(event.target.value)}
+              onChange={(event) => setExamDescription(event.target.value)}
               rows={5}
               placeholder="填写课程、考试范围或特殊说明，帮助 AI 更准确解析评分标准。"
               className="w-full rounded-2xl border border-ink-900/10 bg-white px-4 py-3 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"

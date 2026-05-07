@@ -6,6 +6,9 @@ import enum
 class SubmissionStatus(str, enum.Enum):
     uploaded = "uploaded"
     processing = "processing"
+    rendering = "rendering"
+    extracting = "extracting"
+    grading = "grading"
     graded = "graded"
     needs_review = "needs_review"
     failed = "failed"

@@ -1,15 +1,18 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 
-import { listExams } from '../lib/api'
+import { deleteExam, listExams } from '../lib/api'
 import { formatScore, toClassNames } from '../lib/format'
 import type { ExamListItem } from '../lib/types'
+import { ConfirmDialog } from '../components/ConfirmDialog'
 import { SectionCard } from '../components/SectionCard'
 
 export function ExamListPage() {
   const [exams, setExams] = useState<ExamListItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<number | null>(null)
+  const [deleting, setDeleting] = useState(false)
 
   useEffect(() => {
     let active = true
@@ -36,6 +39,20 @@ export function ExamListPage() {
     }
   }, [])
 
+  async function handleDelete() {
+    if (deleteTarget === null) return
+    setDeleting(true)
+    try {
+      await deleteExam(deleteTarget)
+      setExams((prev) => prev.filter((exam) => exam.id !== deleteTarget))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '删除考试失败')
+    } finally {
+      setDeleting(false)
+      setDeleteTarget(null)
+    }
+  }
+
   return (
     <div className="space-y-6">
       <SectionCard
@@ -53,7 +70,7 @@ export function ExamListPage() {
         <div className="grid gap-4 md:grid-cols-3">
           <Metric label="考试数量" value={String(exams.length)} />
           <Metric label="评分方式" value="按评分标准可追溯评分" />
-          <Metric label="导出" value="CSV / Excel" />
+          <Metric label="导出" value="CSV / Excel / PDF" />
         </div>
       </SectionCard>
 
@@ -89,16 +106,31 @@ export function ExamListPage() {
                       {exam.description || '暂无考试说明。'}
                     </p>
                   </div>
-                  <span
-                    className={toClassNames(
-                      'rounded-full px-3 py-1 text-xs font-semibold ring-1 ring-inset',
-                      exam.needs_rubric_review
-                        ? 'bg-gold-50 text-amber-800 ring-gold-200'
-                        : 'bg-sage-100 text-sage-400 ring-sage-200',
-                    )}
-                  >
-                    {exam.needs_rubric_review ? '评分标准待复核' : '评分标准已确认'}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={toClassNames(
+                        'rounded-full px-3 py-1 text-xs font-semibold ring-1 ring-inset',
+                        exam.needs_rubric_review
+                          ? 'bg-gold-50 text-amber-800 ring-gold-200'
+                          : 'bg-sage-100 text-sage-400 ring-sage-200',
+                      )}
+                    >
+                      {exam.needs_rubric_review ? '评分标准待复核' : '评分标准已确认'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.preventDefault()
+                        setDeleteTarget(exam.id)
+                      }}
+                      className="rounded-full p-1.5 text-ink-700/50 transition hover:bg-red-50 hover:text-red-600"
+                      title="删除考试"
+                    >
+                      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                      </svg>
+                    </button>
+                  </div>
                 </div>
                 <div className="mt-5 grid grid-cols-3 gap-3 text-sm">
                   <Metric label="题目数" value={String(exam.question_count)} compact />
@@ -130,6 +162,17 @@ export function ExamListPage() {
           </div>
         )
       ) : null}
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title="删除考试"
+        message="删除后，该考试的所有评分标准、学生答卷和评分结果将永久丢失。确定要删除吗？"
+        confirmLabel="删除"
+        tone="danger"
+        loading={deleting}
+        onConfirm={() => void handleDelete()}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   )
 }

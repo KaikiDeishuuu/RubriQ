@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
 import { DropZone } from '../components/DropZone'
@@ -9,7 +9,7 @@ import {
   processSubmission,
   uploadSubmissions,
 } from '../lib/api'
-import { formatScore, toClassNames } from '../lib/format'
+import { formatScore, isSubmissionActive, toClassNames } from '../lib/format'
 import type { ExamResultsResponse } from '../lib/types'
 
 export function SubmissionUploadPage() {
@@ -22,37 +22,51 @@ export function SubmissionUploadPage() {
   const [studentName, setStudentName] = useState('')
   const [studentId, setStudentId] = useState('')
   const [uploading, setUploading] = useState(false)
-  const [processingIds, set开始处理ingIds] = useState<number[]>([])
+  const [processingIds, setProcessingIds] = useState<number[]>([])
+  const loadingRef = useRef(false)
+  const backgroundLoadingRef = useRef(false)
 
   useEffect(() => {
     void loadResults()
   }, [numericExamId])
 
   useEffect(() => {
-    if (!results?.rows.some((row) => row.status === 'processing')) {
+    if (!results?.rows.some((row) => isSubmissionActive(row.status))) {
       return
     }
     const timerId = window.setInterval(() => {
-      void loadResults()
+      void loadResults({ background: true })
     }, 3000)
     return () => window.clearInterval(timerId)
   }, [results])
 
-  async function loadResults() {
+  async function loadResults({ background = false }: { background?: boolean } = {}) {
     if (!Number.isFinite(numericExamId)) {
       setError('考试 ID 无效')
-      setLoading(false)
+      if (!background) {
+        setLoading(false)
+      }
       return
     }
+    const requestRef = background ? backgroundLoadingRef : loadingRef
+    if (requestRef.current) {
+      return
+    }
+    requestRef.current = true
     try {
-      setLoading(true)
+      if (!background) {
+        setLoading(true)
+      }
       setError(null)
       const data = await getResults(numericExamId)
       setResults(data)
     } catch (error) {
       setError(error instanceof Error ? error.message : '加载学生答卷失败')
     } finally {
-      setLoading(false)
+      requestRef.current = false
+      if (!background) {
+        setLoading(false)
+      }
     }
   }
 
@@ -72,15 +86,15 @@ export function SubmissionUploadPage() {
     }
   }
 
-  async function handle开始处理(submissionId: number) {
-    set开始处理ingIds((current) => [...current, submissionId])
+  async function handleStartProcessing(submissionId: number) {
+    setProcessingIds((current) => [...current, submissionId])
     try {
       await processSubmission(submissionId)
       await loadResults()
     } catch (error) {
       setError(error instanceof Error ? error.message : '启动处理失败')
     } finally {
-      set开始处理ingIds((current) => current.filter((id) => id !== submissionId))
+      setProcessingIds((current) => current.filter((id) => id !== submissionId))
     }
   }
 
@@ -183,7 +197,7 @@ export function SubmissionUploadPage() {
         <SectionCard title="学生答卷列表" description="可以单独处理每份答卷，并查看当前批改状态。">
           {loading ? <InlineMessage message="正在加载批量结果..." /> : null}
           {error ? <InlineMessage message={error} tone="error" /> : null}
-          {results?.rows.some((row) => row.status === 'processing' || processingIds.includes(row.submission_id)) ? (
+          {results?.rows.some((row) => isSubmissionActive(row.status) || processingIds.includes(row.submission_id)) ? (
             <ProcessingWorkflow />
           ) : null}
           {results ? (
@@ -212,11 +226,11 @@ export function SubmissionUploadPage() {
                         <div className="flex flex-wrap gap-2">
                           <button
                             type="button"
-                            onClick={() => handle开始处理(row.submission_id)}
-                            disabled={processingIds.includes(row.submission_id) || row.status === 'processing'}
+                            onClick={() => handleStartProcessing(row.submission_id)}
+                            disabled={processingIds.includes(row.submission_id) || isSubmissionActive(row.status)}
                             className="rounded-full border border-slateBlue-200 bg-slateBlue-50 px-3 py-2 text-xs font-semibold text-slateBlue-500 transition hover:bg-slateBlue-100 disabled:opacity-50"
                           >
-                            {processingIds.includes(row.submission_id) || row.status === 'processing' ? '处理中...' : '开始处理'}
+                            {processingIds.includes(row.submission_id) || isSubmissionActive(row.status) ? '处理中...' : '开始处理'}
                           </button>
                           <Link
                             to={`/exams/${numericExamId}/review/${row.submission_id}`}

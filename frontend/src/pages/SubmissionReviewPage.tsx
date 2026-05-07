@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from 'react'
+import { FormEvent, useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
 import { PreviewPanel } from '../components/PreviewPanel'
@@ -10,8 +10,8 @@ import {
   overrideAnswer,
   processSubmission,
 } from '../lib/api'
-import { confidenceTone, formatConfidence, formatScore, toClassNames } from '../lib/format'
-import type { Answer, ConfidenceLevel, SubmissionDetail } from '../lib/types'
+import { confidenceTone, formatConfidence, formatScore, isSubmissionActive, toClassNames } from '../lib/format'
+import type { Answer, ConfidenceLevel, SubmissionDetail, SubmissionStatus } from '../lib/types'
 
 export function SubmissionReviewPage() {
   const { examId, submissionId } = useParams()
@@ -24,22 +24,26 @@ export function SubmissionReviewPage() {
   const [selectedQuestionId, setSelectedQuestionId] = useState<number | null>(null)
   const [processing, setProcessing] = useState(false)
   const [savingOverride, setSavingOverride] = useState(false)
+  const loadingRef = useRef(false)
+  const backgroundLoadingRef = useRef(false)
+  const manualQuestionSelectionRef = useRef(false)
 
   useEffect(() => {
     void loadSubmission()
   }, [numericSubmissionId])
 
   useEffect(() => {
-    if (submission?.status !== 'processing') {
+    if (!submission || !isSubmissionActive(submission.status)) {
       return
     }
     const timerId = window.setInterval(() => {
-      void loadSubmission()
+      void loadSubmission({ background: true })
     }, 3000)
     return () => window.clearInterval(timerId)
   }, [submission?.status])
 
   useEffect(() => {
+    manualQuestionSelectionRef.current = false
     if (submission?.exam.questions.length) {
       setSelectedQuestionId((current) => current ?? submission.exam.questions[0].id)
     }
@@ -48,20 +52,32 @@ export function SubmissionReviewPage() {
     }
   }, [submission?.id])
 
-  async function loadSubmission() {
+  async function loadSubmission({ background = false }: { background?: boolean } = {}) {
     if (!Number.isFinite(numericSubmissionId)) {
       setError('答卷 ID 无效')
-      setLoading(false)
+      if (!background) {
+        setLoading(false)
+      }
       return
     }
+    const requestRef = background ? backgroundLoadingRef : loadingRef
+    if (requestRef.current) {
+      return
+    }
+    requestRef.current = true
     try {
-      setLoading(true)
+      if (!background) {
+        setLoading(true)
+      }
       setError(null)
       setSubmission(await getSubmission(numericSubmissionId))
     } catch (error) {
       setError(error instanceof Error ? error.message : '加载答卷失败')
     } finally {
-      setLoading(false)
+      requestRef.current = false
+      if (!background) {
+        setLoading(false)
+      }
     }
   }
 
@@ -108,6 +124,22 @@ export function SubmissionReviewPage() {
   const activeQuestion =
     submission?.exam.questions.find((question) => question.id === selectedQuestionId) ?? submission?.exam.questions[0] ?? null
   const activeAnswer = activeQuestion ? answerByQuestion.get(activeQuestion.id) ?? null : null
+  const completedQuestionCount = submission?.answers.length ?? 0
+  const totalQuestionCount = submission?.exam.questions.length ?? 0
+  const submissionIsActive = submission ? isSubmissionActive(submission.status) : false
+  const completedQuestion = submission?.exam.questions.find((question) => answerByQuestion.has(question.id)) ?? null
+  const activeQuestionIsWaiting = Boolean(submissionIsActive && activeQuestion && !activeAnswer && completedQuestion)
+
+  useEffect(() => {
+    if (!submissionIsActive || manualQuestionSelectionRef.current || activeAnswer || !completedQuestion) {
+      return
+    }
+    setSelectedQuestionId(completedQuestion.id)
+    const completedAnswer = answerByQuestion.get(completedQuestion.id)
+    if (completedAnswer?.source_page) {
+      setSelectedPageIndex(Math.max(0, completedAnswer.source_page - 1))
+    }
+  }, [submissionIsActive, activeAnswer, completedQuestion, answerByQuestion])
 
   return (
     <div className="space-y-6">
@@ -125,10 +157,10 @@ export function SubmissionReviewPage() {
             <button
               type="button"
               onClick={() => void handleProcess()}
-              disabled={processing || !submission || submission.status === 'processing'}
+              disabled={processing || !submission || submissionIsActive}
               className="rounded-full bg-ink-950 px-4 py-2 text-sm font-semibold text-paper transition hover:bg-ink-800 disabled:opacity-50"
             >
-              {processing || submission?.status === 'processing' ? '处理中...' : '开始批改'}
+              {processing || submissionIsActive ? '处理中...' : '开始批改'}
             </button>
           </div>
         }
@@ -148,31 +180,29 @@ export function SubmissionReviewPage() {
 
       {loading ? <Message message="正在加载答卷详情..." /> : null}
       {error ? <Message message={error} tone="error" /> : null}
-      {submission?.status === 'processing' ? <ProcessingWorkflow /> : null}
+      {submissionIsActive && submission ? <ProcessingWorkflow status={submission.status} /> : null}
 
       {submission ? (
-        <div className="grid gap-6 2xl:grid-cols-[420px_minmax(0,1fr)]">
+        <div className="grid gap-6 xl:grid-cols-[360px_minmax(0,1fr)]">
           <div className="space-y-6">
-            <PreviewPanel
-              title="页面预览"
-              description="先浏览学生答卷页面，再查看 AI 提取答案和评分证据。"
-              pages={pages}
-              activeIndex={selectedPageIndex}
-              onChange={setSelectedPageIndex}
-            />
-            <SectionCard title="题目导航" description="选择题目，查看该题得分、答案和评分证据。">
+            <SectionCard title="题目导航" description={`选择题目，查看该题得分、答案和评分证据。已完成 ${completedQuestionCount}/${totalQuestionCount} 题。`}>
               {submission.exam.questions.length === 0 ? (
                 <Message message="评分标准尚未解析。" />
               ) : (
-                <div className="grid gap-2 sm:grid-cols-2 2xl:grid-cols-1">
+                <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-1">
                   {submission.exam.questions.map((question) => {
                     const answer = answerByQuestion.get(question.id)
-                    const labelScore = answer ? `${formatScore(answer.effective_score)}/${formatScore(question.max_score)}` : '暂无答案'
+                    const labelScore = answer
+                      ? `${formatScore(answer.effective_score)}/${formatScore(question.max_score)}`
+                      : submissionIsActive
+                        ? '评分中'
+                        : '暂无答案'
                     return (
                       <button
                         type="button"
                         key={question.id}
                         onClick={() => {
+                          manualQuestionSelectionRef.current = true
                           setSelectedQuestionId(question.id)
                           if (answer?.source_page) {
                             setSelectedPageIndex(Math.max(0, answer.source_page - 1))
@@ -196,90 +226,95 @@ export function SubmissionReviewPage() {
                 </div>
               )}
             </SectionCard>
+            <PreviewPanel
+              title="页面预览"
+              description="浏览学生答卷页面，点击图片可放大查看。"
+              pages={pages}
+              activeIndex={selectedPageIndex}
+              onChange={setSelectedPageIndex}
+            />
           </div>
 
-          <div className="space-y-6">
+          <div className="space-y-6 min-w-0">
             <SectionCard
               title="答案复核"
               description={activeQuestion ? `${activeQuestion.question_no} · ${activeQuestion.title}` : '请选择一道题进行复核。'}
             >
               {activeQuestion && activeAnswer ? (
-                <div className="space-y-6">
-                  <div className="grid gap-4 md:grid-cols-3">
+                <div className="space-y-5">
+                  <div className="grid gap-3 grid-cols-3">
                     <InfoTile label="AI 得分" value={`${formatScore(activeAnswer.score)} / ${formatScore(activeAnswer.max_score)}`} />
                     <InfoTile label="置信度" value={formatConfidence(activeAnswer.confidence)} tone={activeAnswer.confidence} />
                     <InfoTile label="需要复核" value={activeAnswer.needs_human_review ? '是' : '否'} />
                   </div>
 
-                  <div className="rounded-2xl border border-ink-900/10 bg-paper p-4">
+                  <div className="rounded-2xl border border-ink-900/10 bg-paper p-5">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-ink-700">识别出的答案</div>
                     <p className="mt-3 whitespace-pre-wrap text-sm leading-7 text-ink-900">
                       {activeAnswer.extracted_answer || '未识别到答案文本。'}
                     </p>
                   </div>
 
-                  <div className="grid gap-4 2xl:grid-cols-[minmax(0,1fr)_360px]">
-                    <div className="space-y-4 rounded-2xl border border-ink-900/10 bg-white p-4">
-                      <div className="flex items-center justify-between gap-4">
-                        <div>
-                          <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-ink-700">评分项评估</div>
-                          <div className="mt-1 text-sm text-ink-700">
-                            每一行都记录该评分项给分和对应证据，方便复查。
-                          </div>
-                        </div>
+                  <div className="rounded-2xl border border-ink-900/10 bg-white p-5">
+                    <div className="mb-4 flex items-center justify-between gap-4">
+                      <div>
+                        <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-ink-700">评分项评估</div>
+                        <div className="mt-1 text-sm text-ink-700">每一行都记录该评分项给分和对应证据，方便复查。</div>
                       </div>
-                      <div className="overflow-x-auto rounded-2xl border border-ink-900/10">
-                        <table className="min-w-[760px] divide-y divide-ink-900/10 text-left text-sm">
-                          <thead className="bg-paper text-[11px] uppercase tracking-[0.18em] text-ink-700">
-                            <tr>
-                              <th className="w-[42%] px-4 py-3">评分说明</th>
-                              <th className="w-24 px-4 py-3">得分</th>
-                              <th className="w-[46%] px-4 py-3">证据</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-ink-900/10 bg-white">
-                            {activeAnswer.rubric_results.length > 0 ? (
-                              activeAnswer.rubric_results.map((result) => (
-                                <tr key={result.id} className="align-top">
-                                  <td className="px-4 py-3 align-top">
-                                    <div className="font-semibold text-ink-950">评分项 #{result.rubric_item_id}</div>
-                                    <div className="mt-2 whitespace-pre-wrap text-sm leading-6 text-ink-700">{result.reason}</div>
-                                  </td>
-                                  <td className="px-4 py-3 align-top font-semibold text-ink-950">{formatScore(result.awarded_score)}</td>
-                                  <td className="whitespace-pre-wrap px-4 py-3 align-top text-sm leading-6 text-ink-700">{result.evidence || '暂无证据。'}</td>
-                                </tr>
-                              ))
-                            ) : (
-                              <tr>
-                                <td className="px-4 py-4 text-sm text-ink-700" colSpan={3}>
-                                  该答案暂无评分项记录。
+                    </div>
+                    <div className="-mx-5 overflow-hidden">
+                      <table className="w-full text-left text-sm">
+                        <thead className="border-b border-ink-900/10 bg-paper/50 text-[11px] uppercase tracking-[0.18em] text-ink-700">
+                          <tr>
+                            <th className="w-[45%] px-5 py-3">评分说明</th>
+                            <th className="w-[10%] px-5 py-3 text-right">得分</th>
+                            <th className="w-[45%] px-5 py-3">证据</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-ink-900/10">
+                          {activeAnswer.rubric_results.length > 0 ? (
+                            activeAnswer.rubric_results.map((result) => (
+                              <tr key={result.id} className="align-top">
+                                <td className="px-5 py-4 align-top">
+                                  <div className="font-semibold text-ink-950">评分项 #{result.rubric_item_id}</div>
+                                  <div className="mt-2 whitespace-pre-wrap text-sm leading-6 text-ink-700">{result.reason}</div>
+                                </td>
+                                <td className="px-5 py-4 align-top text-right font-semibold text-ink-950">{formatScore(result.awarded_score)}</td>
+                                <td className="px-5 py-4 align-top">
+                                  <div className="whitespace-pre-wrap text-sm leading-6 text-ink-700">{result.evidence || '暂无证据。'}</div>
                                 </td>
                               </tr>
-                            )}
-                          </tbody>
-                        </table>
+                            ))
+                          ) : (
+                            <tr>
+                              <td className="px-5 py-4 text-sm text-ink-700" colSpan={3}>该答案暂无评分项记录。</td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-5 lg:grid-cols-[1fr_320px]">
+                    <div className="rounded-2xl border border-ink-900/10 bg-white p-5">
+                      <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-ink-700">缺失要点</div>
+                      <div className="mt-3 space-y-2">
+                        {activeAnswer.missing_points.length > 0 ? (
+                          activeAnswer.missing_points.map((point) => (
+                            <span
+                              key={point}
+                              className="block rounded-2xl bg-gold-50 px-3 py-2 text-sm leading-6 text-amber-800 ring-1 ring-inset ring-gold-200"
+                            >
+                              {point}
+                            </span>
+                          ))
+                        ) : (
+                          <span className="text-sm text-ink-700">暂无缺失要点记录。</span>
+                        )}
                       </div>
                     </div>
 
-                    <div className="space-y-4 rounded-2xl border border-ink-900/10 bg-white p-4">
-                      <div>
-                        <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-ink-700">缺失要点</div>
-                        <div className="mt-3 space-y-2">
-                          {activeAnswer.missing_points.length > 0 ? (
-                            activeAnswer.missing_points.map((point) => (
-                              <span
-                                key={point}
-                                className="block rounded-2xl bg-gold-50 px-3 py-2 text-sm leading-6 text-amber-800 ring-1 ring-inset ring-gold-200"
-                              >
-                                {point}
-                              </span>
-                            ))
-                          ) : (
-                            <span className="text-sm text-ink-700">暂无缺失要点记录。</span>
-                          )}
-                        </div>
-                      </div>
-
+                    <div className="rounded-2xl border border-ink-900/10 bg-white p-5">
                       <form key={activeAnswer.id} className="space-y-4" onSubmit={(event) => void handleOverride(event, activeAnswer)}>
                         <label className="block space-y-2">
                           <span className="text-sm font-semibold text-ink-800">老师改分</span>
@@ -297,7 +332,7 @@ export function SubmissionReviewPage() {
                           <span className="text-sm font-semibold text-ink-800">老师评语</span>
                           <textarea
                             name="teacher_comment"
-                            rows={5}
+                            rows={4}
                             defaultValue={activeAnswer.teacher_comment ?? ''}
                             placeholder="说明改分原因，或确认 AI 评分无误。"
                             className="w-full rounded-2xl border border-ink-900/10 bg-paper px-4 py-3 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
@@ -322,7 +357,15 @@ export function SubmissionReviewPage() {
                   </details>
                 </div>
               ) : (
-                <Message message="请先开始批改，或选择已处理的题目查看 AI 评分证据。" />
+                <Message
+                  message={
+                    activeQuestionIsWaiting
+                      ? `该题仍在等待评分，已有 ${completedQuestionCount}/${totalQuestionCount} 题完成，可点击左侧已出分题目先查看。`
+                      : submissionIsActive && activeQuestion
+                        ? `该题正在等待评分结果，当前已完成 ${completedQuestionCount}/${totalQuestionCount} 题。`
+                        : '请先开始批改，或选择已处理的题目查看 AI 评分证据。'
+                  }
+                />
               )}
             </SectionCard>
 
@@ -341,20 +384,126 @@ export function SubmissionReviewPage() {
   )
 }
 
-function ProcessingWorkflow() {
-  const steps = ['已提交处理请求', '渲染答卷页面', '识别学生姓名和学号', '提取每题答案', '调用模型评分并生成复核证据']
+const PIPELINE_STEPS = [
+  { key: 'processing' as SubmissionStatus, label: '提交处理', desc: '已接收处理请求' },
+  { key: 'rendering' as SubmissionStatus, label: '渲染页面', desc: '将 PDF 逐页转为高清图片' },
+  { key: 'extracting' as SubmissionStatus, label: '识别提取', desc: 'AI 视觉模型识别姓名、学号和每道题答案文本' },
+  { key: 'grading' as SubmissionStatus, label: 'AI 评分', desc: '按评分标准逐题打分并生成复核证据' },
+]
+
+function ProcessingWorkflow({ status }: { status: SubmissionStatus }) {
+  const activeIndex = PIPELINE_STEPS.findIndex((step) => step.key === status)
+  const currentStep = activeIndex >= 0 ? activeIndex : 0
+
   return (
-    <div className="rounded-3xl border border-slateBlue-200 bg-slateBlue-50 p-5 shadow-soft">
-      <div className="font-display text-2xl text-slateBlue-500">正在处理答卷</div>
-      <div className="mt-4 grid gap-3 md:grid-cols-5">
-        {steps.map((step, index) => (
-          <div key={step} className="rounded-2xl bg-white px-3 py-3 text-sm font-semibold text-ink-800 ring-1 ring-inset ring-slateBlue-100">
-            <div className="mb-2 flex h-7 w-7 items-center justify-center rounded-full bg-slateBlue-100 text-xs text-slateBlue-500">{index + 1}</div>
-            {step}
-          </div>
-        ))}
+    <div
+      className="animate-workflow-slide-in rounded-3xl border border-slateBlue-200 bg-gradient-to-br from-slateBlue-50/60 via-white to-white p-6 shadow-soft"
+      style={{ animationDelay: '0.1s' }}
+    >
+      <div className="flex items-center gap-4">
+        <span className="relative flex h-4 w-4">
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-slateBlue-400 opacity-60" />
+          <span className="relative inline-flex h-4 w-4 rounded-full bg-slateBlue-500 shadow-sm" />
+        </span>
+        <div>
+          <h3 className="font-display text-2xl text-slateBlue-500">正在处理答卷</h3>
+          <p className="mt-1 text-sm text-ink-700 animate-workflow-pulse">
+            {PIPELINE_STEPS[currentStep].desc}
+          </p>
+        </div>
       </div>
-      <p className="mt-4 text-sm text-ink-700">页面会自动刷新。处理完成后，学生信息、答案文本、得分和评分证据会显示在下方。</p>
+
+      <div className="mt-6 grid gap-3 md:grid-cols-4">
+        {PIPELINE_STEPS.map((step, index) => {
+          const isCompleted = index < currentStep
+          const isActive = index === currentStep
+          const isPending = index > currentStep
+
+          return (
+            <div
+              key={step.key}
+              className="animate-workflow-slide-in rounded-2xl px-4 py-4 text-sm transition-all duration-500"
+              style={{ animationDelay: `${0.15 + index * 0.1}s` }}
+            >
+              <div
+                className={toClassNames(
+                  'rounded-2xl px-4 py-4 transition-all duration-500',
+                  isCompleted && 'bg-sage-50 ring-1 ring-inset ring-sage-200',
+                  isActive && 'animate-workflow-shimmer bg-white ring-2 ring-slateBlue-300 shadow-md',
+                  isPending && 'bg-white/60 ring-1 ring-inset ring-ink-900/10',
+                )}
+              >
+                <div className="flex items-center gap-3">
+                  <span
+                    className={toClassNames(
+                      'flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-bold transition-all duration-500',
+                      isCompleted && 'bg-sage-400 text-white',
+                      isActive && 'bg-slateBlue-500 text-white shadow-sm',
+                      isPending && 'bg-ink-100 text-ink-700',
+                    )}
+                  >
+                    {isCompleted ? (
+                      <svg
+                        className="animate-workflow-check h-4 w-4"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                        strokeWidth={3}
+                      >
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                      </svg>
+                    ) : isActive ? (
+                      <svg className="h-4 w-4 animate-spin" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <circle cx="12" cy="12" r="10" strokeDasharray="32" strokeDashoffset="32" strokeLinecap="round" />
+                      </svg>
+                    ) : (
+                      index + 1
+                    )}
+                  </span>
+                  <div className="min-w-0">
+                    <div
+                      className={toClassNames(
+                        'truncate font-semibold transition-colors duration-500',
+                        isCompleted && 'text-sage-400',
+                        isActive && 'text-slateBlue-500',
+                        isPending && 'text-ink-700',
+                      )}
+                    >
+                      {step.label}
+                    </div>
+                    <div className="mt-0.5 truncate text-[11px] text-ink-700">{step.desc}</div>
+                  </div>
+                </div>
+                {isActive ? (
+                  <div className="mt-3 h-1 overflow-hidden rounded-full bg-slateBlue-100">
+                    <div
+                      className="h-full rounded-full bg-slateBlue-400"
+                      style={{
+                        width: '100%',
+                        animation: 'workflow-shimmer 1.5s linear infinite',
+                        backgroundSize: '200% 100%',
+                      }}
+                    />
+                  </div>
+                ) : isCompleted ? (
+                  <div className="mt-3 h-1 rounded-full bg-sage-200">
+                    <div className="h-full w-full rounded-full bg-sage-400 transition-all duration-500" />
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+
+      <p className="mt-5 text-sm text-ink-700 animate-workflow-pulse">
+        {currentStep >= 3
+          ? '评分通常需要 10–30 秒，请耐心等待。'
+          : currentStep >= 1
+            ? 'AI 模型正在处理，稍后进入评分阶段。'
+            : '正在准备数据，即将进入 AI 处理阶段。'}
+        页面每 3 秒自动刷新。
+      </p>
     </div>
   )
 }

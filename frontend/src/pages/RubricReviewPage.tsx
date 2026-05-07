@@ -75,7 +75,7 @@ export function RubricReviewPage() {
 		}
 	}
 
-	async function handle保存Question(question: Question, event: FormEvent<HTMLFormElement>) {
+	async function handleSaveQuestion(question: Question, event: FormEvent<HTMLFormElement>) {
 		event.preventDefault()
 		const formData = new FormData(event.currentTarget)
 		setBusy(true)
@@ -95,7 +95,7 @@ export function RubricReviewPage() {
 		}
 	}
 
-	async function handle保存RubricItem(questionId: number, item: RubricItem, event: FormEvent<HTMLFormElement>) {
+	async function handleSaveRubricItem(questionId: number, item: RubricItem, event: FormEvent<HTMLFormElement>) {
 		event.preventDefault()
 		const formData = new FormData(event.currentTarget)
 		setBusy(true)
@@ -103,7 +103,7 @@ export function RubricReviewPage() {
 			await updateRubricItem(item.id, {
 				description: String(formData.get('description') ?? item.description),
 				max_score: Number(formData.get('max_score') ?? item.max_score),
-				keywords: parse关键词(String(formData.get('keywords') ?? item.keywords.join(', '))),
+				keywords: parseKeywords(String(formData.get('keywords') ?? item.keywords.join(', '))),
 				order_index: Number(formData.get('order_index') ?? item.order_index),
 			})
 			setFeedback('评分项已更新。')
@@ -123,7 +123,7 @@ export function RubricReviewPage() {
 			await createRubricItem(questionId, {
 				description: String(formData.get('description') ?? ''),
 				max_score: Number(formData.get('max_score') ?? 0),
-				keywords: parse关键词(String(formData.get('keywords') ?? '')),
+				keywords: parseKeywords(String(formData.get('keywords') ?? '')),
 				order_index: Number(formData.get('order_index') ?? 0),
 			})
 			event.currentTarget.reset()
@@ -136,7 +136,7 @@ export function RubricReviewPage() {
 		}
 	}
 
-	async function handle删除RubricItem(questionId: number, itemId: number) {
+	async function handleDeleteRubricItem(questionId: number, itemId: number) {
 		if (!window.confirm('确定要删除这个评分项吗？')) {
 			return
 		}
@@ -247,9 +247,9 @@ export function RubricReviewPage() {
 								<QuestionEditorCard
 									key={question.id}
 									question={question}
-									on保存Question={handle保存Question}
-									on保存RubricItem={handle保存RubricItem}
-									on删除RubricItem={handle删除RubricItem}
+									onSaveQuestion={handleSaveQuestion}
+									onSaveRubricItem={handleSaveRubricItem}
+									onDeleteRubricItem={handleDeleteRubricItem}
 									onCreateRubricItem={handleCreateRubricItem}
 									disabled={busy}
 								/>
@@ -268,16 +268,16 @@ export function RubricReviewPage() {
 
 function QuestionEditorCard({
 	question,
-	on保存Question,
-	on保存RubricItem,
-	on删除RubricItem,
+	onSaveQuestion,
+	onSaveRubricItem,
+	onDeleteRubricItem,
 	onCreateRubricItem,
 	disabled,
 }: {
 	question: Question
-	on保存Question: (question: Question, event: FormEvent<HTMLFormElement>) => Promise<void>
-	on保存RubricItem: (questionId: number, item: RubricItem, event: FormEvent<HTMLFormElement>) => Promise<void>
-	on删除RubricItem: (questionId: number, itemId: number) => Promise<void>
+	onSaveQuestion: (question: Question, event: FormEvent<HTMLFormElement>) => Promise<void>
+	onSaveRubricItem: (questionId: number, item: RubricItem, event: FormEvent<HTMLFormElement>) => Promise<void>
+	onDeleteRubricItem: (questionId: number, itemId: number) => Promise<void>
 	onCreateRubricItem: (questionId: number, event: FormEvent<HTMLFormElement>) => Promise<void>
 	disabled: boolean
 }) {
@@ -286,7 +286,7 @@ function QuestionEditorCard({
 			<form
 				className="space-y-4"
 				onSubmit={async (event) => {
-					await on保存Question(question, event)
+					await onSaveQuestion(question, event)
 				}}
 			>
 				<div className="flex flex-wrap items-center justify-between gap-3">
@@ -353,7 +353,7 @@ function QuestionEditorCard({
 						key={item.id}
 						className="grid gap-3 rounded-2xl border border-ink-900/10 bg-paper p-4 md:grid-cols-[2fr_0.55fr_1fr_0.45fr_auto_auto]"
 						onSubmit={async (event) => {
-							await on保存RubricItem(question.id, item, event)
+							await onSaveRubricItem(question.id, item, event)
 						}}
 					>
 						<label className="block space-y-2 md:col-span-1">
@@ -405,7 +405,7 @@ function QuestionEditorCard({
 								type="button"
 								disabled={disabled}
 								onClick={async () => {
-									await on删除RubricItem(question.id, item.id)
+									await onDeleteRubricItem(question.id, item.id)
 								}}
 								className="rounded-full border border-red-200 bg-red-50 px-4 py-2 text-sm font-semibold text-red-700 transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
 							>
@@ -497,7 +497,7 @@ function Message({ message, tone = 'neutral' }: { message: string; tone?: 'neutr
 	)
 }
 
-function parse关键词(input: string): string[] {
+function parseKeywords(input: string): string[] {
 	return input
 		.split(',')
 		.map((part) => part.trim())

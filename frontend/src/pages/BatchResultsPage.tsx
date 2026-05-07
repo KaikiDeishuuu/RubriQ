@@ -1,16 +1,31 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
 import {
+  deleteSubmission,
   downloadBlob,
   exportResultsCsv,
+  exportResultsPdf,
   exportResultsXlsx,
   getResults,
 } from '../lib/api'
-import { formatScore, toClassNames } from '../lib/format'
+import { formatScore, isSubmissionActive, toClassNames } from '../lib/format'
 import type { ExamResultsResponse } from '../lib/types'
+import { ConfirmDialog } from '../components/ConfirmDialog'
 import { SectionCard } from '../components/SectionCard'
 import { StatusBadge } from '../components/StatusBadge'
+
+type ExportFormat = 'csv' | 'xlsx' | 'pdf'
+
+async function exportResults(format: ExportFormat, examId: number): Promise<Blob> {
+  if (format === 'csv') {
+    return exportResultsCsv(examId)
+  }
+  if (format === 'xlsx') {
+    return exportResultsXlsx(examId)
+  }
+  return exportResultsPdf(examId)
+}
 
 export function BatchResultsPage() {
   const { examId } = useParams()
@@ -18,36 +33,80 @@ export function BatchResultsPage() {
   const [data, setData] = useState<ExamResultsResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [exporting, setExporting] = useState<'csv' | 'xlsx' | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<number | null>(null)
+  const [deleting, setDeleting] = useState(false)
+  const [exporting, setExporting] = useState<ExportFormat | null>(null)
+  const loadingRef = useRef(false)
+  const backgroundLoadingRef = useRef(false)
 
   useEffect(() => {
     void loadResults()
   }, [numericExamId])
 
-  async function loadResults() {
-    if (!Number.isFinite(numericExamId)) {
-      setError('考试 ID 无效')
-      setLoading(false)
+  useEffect(() => {
+    if (!data?.rows.some((row) => isSubmissionActive(row.status))) {
       return
     }
+    const timerId = window.setInterval(() => {
+      void loadResults({ background: true })
+    }, 3000)
+    return () => window.clearInterval(timerId)
+  }, [data])
+
+  async function loadResults({ background = false }: { background?: boolean } = {}) {
+    if (!Number.isFinite(numericExamId)) {
+      setError('考试 ID 无效')
+      if (!background) {
+        setLoading(false)
+      }
+      return
+    }
+    const requestRef = background ? backgroundLoadingRef : loadingRef
+    if (requestRef.current) {
+      return
+    }
+    requestRef.current = true
     try {
-      setLoading(true)
+      if (!background) {
+        setLoading(true)
+      }
       setError(null)
       setData(await getResults(numericExamId))
     } catch (error) {
       setError(error instanceof Error ? error.message : '加载结果失败')
     } finally {
-      setLoading(false)
+      requestRef.current = false
+      if (!background) {
+        setLoading(false)
+      }
     }
   }
 
-  async function handleExport(format: 'csv' | 'xlsx') {
+  async function handleDelete() {
+    if (deleteTarget === null) return
+    setDeleting(true)
+    try {
+      await deleteSubmission(deleteTarget)
+      setData((prev) =>
+        prev
+          ? { ...prev, rows: prev.rows.filter((row) => row.submission_id !== deleteTarget) }
+          : prev,
+      )
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '删除答卷失败')
+    } finally {
+      setDeleting(false)
+      setDeleteTarget(null)
+    }
+  }
+
+  async function handleExport(format: ExportFormat) {
     if (!Number.isFinite(numericExamId)) {
       return
     }
     setExporting(format)
     try {
-      const blob = format === 'csv' ? await exportResultsCsv(numericExamId) : await exportResultsXlsx(numericExamId)
+      const blob = await exportResults(format, numericExamId)
       await downloadBlob(blob, `exam-${numericExamId}-results.${format}`)
     } catch (error) {
       setError(error instanceof Error ? error.message : '导出结果失败')
@@ -83,6 +142,14 @@ export function BatchResultsPage() {
               className="rounded-full border border-ink-900/10 bg-white px-4 py-2 text-sm font-semibold text-ink-950 transition hover:bg-paper disabled:opacity-50"
             >
               {exporting === 'xlsx' ? '正在导出 Excel...' : '导出 Excel'}
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleExport('pdf')}
+              disabled={exporting !== null}
+              className="rounded-full border border-slateBlue-200 bg-slateBlue-50 px-4 py-2 text-sm font-semibold text-slateBlue-500 transition hover:bg-slateBlue-100 disabled:opacity-50"
+            >
+              {exporting === 'pdf' ? '正在导出 PDF...' : '导出 PDF'}
             </button>
           </div>
         }
@@ -138,18 +205,37 @@ export function BatchResultsPage() {
                       <StatusBadge status={row.status} />
                     </td>
                     <td className="px-5 py-4 font-semibold text-ink-950">{formatScore(row.total_score)}</td>
-                    {data.questions.map((question) => (
-                      <td key={question.id} className="px-5 py-4 font-medium text-ink-900">
-                        {formatScore(row.question_scores[question.question_no] ?? 0)}
-                      </td>
-                    ))}
+                    {data.questions.map((question) => {
+                      const score = row.question_scores[question.question_no]
+                      return (
+                        <td key={question.id} className="px-5 py-4 font-medium text-ink-900">
+                          {score === undefined && isSubmissionActive(row.status) ? (
+                            <span className="text-xs font-semibold text-slateBlue-500">评分中</span>
+                          ) : (
+                            formatScore(score ?? 0)
+                          )}
+                        </td>
+                      )
+                    })}
                     <td className="px-5 py-4">
-                      <Link
-                        to={`/exams/${numericExamId}/review/${row.submission_id}`}
-                        className="rounded-full border border-ink-900/10 bg-white px-3 py-2 text-xs font-semibold text-ink-950 transition hover:bg-paper"
-                      >
-                        打开复核
-                      </Link>
+                      <div className="flex items-center gap-2">
+                        <Link
+                          to={`/exams/${numericExamId}/review/${row.submission_id}`}
+                          className="rounded-full border border-ink-900/10 bg-white px-3 py-2 text-xs font-semibold text-ink-950 transition hover:bg-paper"
+                        >
+                          打开复核
+                        </Link>
+                        <button
+                          type="button"
+                          onClick={() => setDeleteTarget(row.submission_id)}
+                          className="rounded-full p-1.5 text-ink-700/50 transition hover:bg-red-50 hover:text-red-600"
+                          title="删除答卷"
+                        >
+                          <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                          </svg>
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -158,6 +244,17 @@ export function BatchResultsPage() {
           </div>
         </section>
       ) : null}
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title="删除答卷"
+        message="删除后，该学生的答卷和评分数据将永久丢失。确定要删除吗？"
+        confirmLabel="删除"
+        tone="danger"
+        loading={deleting}
+        onConfirm={() => void handleDelete()}
+        onCancel={() => setDeleteTarget(null)}
+      />
     </div>
   )
 }
