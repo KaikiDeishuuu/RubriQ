@@ -9,6 +9,8 @@ backend/storage/
 /storage/
 !/backend/app/storage/
 !/backend/app/storage/**
+/backend/app/storage/__pycache__/
+/backend/app/storage/**/*.pyc
 
 # Frontend
 frontend/node_modules/
