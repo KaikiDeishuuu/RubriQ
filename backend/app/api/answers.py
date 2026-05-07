@@ -1,0 +1,50 @@
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+
+from app.api.common import load_submission_detail, serialize_submission_detail
+from app.api.deps import get_db
+from app.models import Answer
+from app.schemas.submission import AnswerDetail, SubmissionOverride
+from app.services.pipeline import PipelineError, apply_teacher_override
+
+router = APIRouter(prefix="/answers", tags=["answers"])
+
+
+@router.put("/{answer_id}/override", response_model=AnswerDetail)
+def override_answer_score(
+    answer_id: int,
+    payload: SubmissionOverride,
+    session: Session = Depends(get_db),
+):
+    try:
+        answer = apply_teacher_override(
+            session=session,
+            answer_id=answer_id,
+            teacher_override_score=payload.teacher_override_score,
+            teacher_comment=payload.teacher_comment,
+        )
+    except PipelineError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _serialize_answer(answer)
+
+
+def _serialize_answer(answer: Answer) -> AnswerDetail:
+    from app.schemas.exam import QuestionRead
+    from app.schemas.submission import AnswerRubricResultRead
+
+    payload = AnswerDetail.model_validate(
+        {
+            **answer.__dict__,
+            "question": QuestionRead.model_validate(answer.question).model_dump(),
+            "rubric_results": [
+                AnswerRubricResultRead.model_validate(rubric_result).model_dump()
+                for rubric_result in answer.rubric_results
+            ],
+            "effective_score": float(
+                answer.teacher_override_score if answer.teacher_override_score is not None else answer.score
+            ),
+        }
+    )
+    return payload

@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+
+# Backend / storage
+backend/storage/
+storage/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Claude
+.claude/
+
+# Misc
+.DS_Store
+*.log

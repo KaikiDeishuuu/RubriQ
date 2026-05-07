@@ -1,0 +1,113 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-grader}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-grader}
+      POSTGRES_DB: ${POSTGRES_DB:-grader}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-grader} -d $${POSTGRES_DB:-grader}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${DOCKER_DATABASE_URL:-postgresql+psycopg://grader:grader@postgres:5432/grader}
+      REDIS_URL: ${DOCKER_REDIS_URL:-redis://redis:6379/0}
+      STORAGE_DIR: ${STORAGE_DIR}
+      AI_BASE_URL: ${AI_BASE_URL}
+      AI_API_KEY: ${AI_API_KEY}
+      AI_VISION_BASE_URL: ${AI_VISION_BASE_URL:-}
+      AI_VISION_API_KEY: ${AI_VISION_API_KEY:-}
+      AI_GRADING_BASE_URL: ${AI_GRADING_BASE_URL:-}
+      AI_GRADING_API_KEY: ${AI_GRADING_API_KEY:-}
+      AI_VISION_MODEL: ${AI_VISION_MODEL}
+      AI_GRADING_MODEL: ${AI_GRADING_MODEL}
+      CORS_ORIGINS: ${CORS_ORIGINS}
+    working_dir: /workspace/backend
+    volumes:
+      - ./backend:/workspace/backend
+      - ./prompts:/workspace/prompts
+      - ./storage:/workspace/storage
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${DOCKER_DATABASE_URL:-postgresql+psycopg://grader:grader@postgres:5432/grader}
+      REDIS_URL: ${DOCKER_REDIS_URL:-redis://redis:6379/0}
+      STORAGE_DIR: ${STORAGE_DIR}
+      AI_BASE_URL: ${AI_BASE_URL}
+      AI_API_KEY: ${AI_API_KEY}
+      AI_VISION_BASE_URL: ${AI_VISION_BASE_URL:-}
+      AI_VISION_API_KEY: ${AI_VISION_API_KEY:-}
+      AI_GRADING_BASE_URL: ${AI_GRADING_BASE_URL:-}
+      AI_GRADING_API_KEY: ${AI_GRADING_API_KEY:-}
+      AI_VISION_MODEL: ${AI_VISION_MODEL}
+      AI_GRADING_MODEL: ${AI_GRADING_MODEL}
+    working_dir: /workspace/backend
+    volumes:
+      - ./backend:/workspace/backend
+      - ./prompts:/workspace/prompts
+      - ./storage:/workspace/storage
+    command: celery -A app.workers.celery_app.celery_app worker -l info
+    depends_on:
+      backend:
+        condition: service_started
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    env_file:
+      - .env
+    environment:
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8000/api}
+    working_dir: /workspace/frontend
+    volumes:
+      - ./frontend:/workspace/frontend
+      - frontend_node_modules:/workspace/frontend/node_modules
+    command: sh -c "[ -d node_modules ] || npm install; npm run dev -- --host 0.0.0.0 --port 5173"
+    depends_on:
+      - backend
+    ports:
+      - "5173:5173"
+
+volumes:
+  pgdata:
+  frontend_node_modules:
