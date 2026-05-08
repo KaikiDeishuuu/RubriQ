@@ -78,7 +78,7 @@ def test_call_structured_json_uses_route_key_candidate_chain(monkeypatch: pytest
     monkeypatch.setattr(
         "app.services.llm._settings_model_candidates",
         lambda route_key: [
-            SimpleNamespace(profile="grading", model=f"{route_key}-primary", base_url="https://one.test", api_key="one"),
+            SimpleNamespace(profile="grading", model=f"{route_key}-primary", base_url="https://one.test", api_key="one", supports_vision=False),
         ],
     )
     monkeypatch.setattr("app.services.llm.get_ai_client_for", lambda *_args: FakeClient("candidate", calls))
@@ -107,7 +107,7 @@ def test_call_structured_json_uses_grading_review_route_key(monkeypatch: pytest.
     monkeypatch.setattr(
         "app.services.llm._settings_model_candidates",
         lambda route_key: [
-            SimpleNamespace(profile="grading", model=f"{route_key}-model", base_url="https://one.test", api_key="one"),
+            SimpleNamespace(profile="grading", model=f"{route_key}-model", base_url="https://one.test", api_key="one", supports_vision=False),
         ],
     )
     monkeypatch.setattr("app.services.llm.get_ai_client_for", lambda *_args: FakeClient("candidate", calls))
@@ -136,8 +136,8 @@ def test_call_structured_json_falls_back_to_second_candidate(monkeypatch: pytest
     monkeypatch.setattr(
         "app.services.llm._settings_model_candidates",
         lambda _route_key: [
-            SimpleNamespace(profile="grading", model="first-model", base_url="https://one.test", api_key="one"),
-            SimpleNamespace(profile="grading", model="second-model", base_url="https://two.test", api_key="two"),
+            SimpleNamespace(profile="grading", model="first-model", base_url="https://one.test", api_key="one", supports_vision=False),
+            SimpleNamespace(profile="grading", model="second-model", base_url="https://two.test", api_key="two", supports_vision=False),
         ],
     )
     monkeypatch.setattr("app.services.llm.get_ai_client_for", lambda base_url, _api_key: clients[base_url])
@@ -160,6 +160,55 @@ def test_call_structured_json_falls_back_to_second_candidate(monkeypatch: pytest
 
 
 
+def test_call_structured_json_skips_image_unsupported_candidates(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls: list[str] = []
+    image_path = tmp_path / "page.png"
+    image_path.write_bytes(b"fake")
+    clients = {
+        "https://text.test": FakeClient("text", calls, ['{"value": "should not call"}']),
+        "https://vision.test": FakeClient("vision", calls, ['{"value": "vision ok"}']),
+    }
+    monkeypatch.setattr(
+        "app.services.llm._settings_model_candidates",
+        lambda _route_key: [
+            SimpleNamespace(
+                profile="vision",
+                model="text-only-review",
+                base_url="https://text.test",
+                api_key="text",
+                supports_vision=False,
+            ),
+            SimpleNamespace(
+                profile="vision",
+                model="vision-review",
+                base_url="https://vision.test",
+                api_key="vision",
+                supports_vision=True,
+            ),
+        ],
+    )
+    monkeypatch.setattr("app.services.llm.get_ai_client_for", lambda base_url, _api_key: clients[base_url])
+    monkeypatch.setattr("app.services.llm.render_prompt", lambda *_args, **_kwargs: "prompt")
+    monkeypatch.setattr("app.services.llm.build_multimodal_messages", lambda *_args, **_kwargs: [])
+
+    result = call_structured_json(
+        model="legacy-model",
+        system_prompt_name="system.md",
+        user_prompt_name="user.md",
+        response_model=SimpleResponse,
+        image_paths=[image_path],
+        request_profile="vision",
+        route_key="vision_grading_review",
+    )
+
+    assert result.data.value == "vision ok"
+    assert result.model == "vision-review"
+    assert result.candidate_index == 2
+    assert result.fallback_used is True
+    assert calls == ["vision:vision-review"]
+
+
+
 def test_call_structured_json_stops_after_first_success(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
     clients = {
@@ -169,8 +218,8 @@ def test_call_structured_json_stops_after_first_success(monkeypatch: pytest.Monk
     monkeypatch.setattr(
         "app.services.llm._settings_model_candidates",
         lambda _route_key: [
-            SimpleNamespace(profile="vision", model="first-model", base_url="https://one.test", api_key="one"),
-            SimpleNamespace(profile="vision", model="second-model", base_url="https://two.test", api_key="two"),
+            SimpleNamespace(profile="vision", model="first-model", base_url="https://one.test", api_key="one", supports_vision=True),
+            SimpleNamespace(profile="vision", model="second-model", base_url="https://two.test", api_key="two", supports_vision=True),
         ],
     )
     monkeypatch.setattr("app.services.llm.get_ai_client_for", lambda base_url, _api_key: clients[base_url])
@@ -201,8 +250,8 @@ def test_call_structured_json_reports_all_candidate_failures(monkeypatch: pytest
     monkeypatch.setattr(
         "app.services.llm._settings_model_candidates",
         lambda _route_key: [
-            SimpleNamespace(profile="grading", model="first-model", base_url="https://one.test", api_key="one"),
-            SimpleNamespace(profile="grading", model="second-model", base_url="https://two.test", api_key="two"),
+            SimpleNamespace(profile="grading", model="first-model", base_url="https://one.test", api_key="one", supports_vision=False),
+            SimpleNamespace(profile="grading", model="second-model", base_url="https://two.test", api_key="two", supports_vision=False),
         ],
     )
     monkeypatch.setattr("app.services.llm.get_ai_client_for", lambda base_url, _api_key: clients[base_url])
@@ -228,7 +277,7 @@ def test_call_structured_json_repairs_json_within_candidate(monkeypatch: pytest.
     client = FakeClient("one", calls, ['{"value": 3}', '{"value": "repaired"}'])
     monkeypatch.setattr(
         "app.services.llm._settings_model_candidates",
-        lambda _route_key: [SimpleNamespace(profile="grading", model="repair-model", base_url="https://one.test", api_key="one")],
+        lambda _route_key: [SimpleNamespace(profile="grading", model="repair-model", base_url="https://one.test", api_key="one", supports_vision=False)],
     )
     monkeypatch.setattr("app.services.llm.get_ai_client_for", lambda *_args: client)
     monkeypatch.setattr("app.services.llm.render_prompt", lambda *_args, **_kwargs: "prompt")

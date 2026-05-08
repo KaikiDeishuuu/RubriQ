@@ -5,7 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db.base import Base
-from app.models import Answer, ConfidenceLevel, Exam, Question, Submission, SubmissionStatus
+from app.models import Answer, ConfidenceLevel, Exam, Question, Submission, SubmissionPage, SubmissionStatus
 from app.schemas.ai import ExtractedQuestion, RubricParseResult, StudentExtractionResult
 from app.services import pipeline
 from app.services.pipeline import (
@@ -60,6 +60,59 @@ def test_strictness_instructions_returns_known_modes_and_empty_unknown() -> None
     assert _strictness_instructions("unknown") == ""
 
 
+def test_strictness_policy_does_not_lift_unsupported_non_empty_answer(monkeypatch) -> None:
+    question = _question_snapshot()
+    grading_result = _grading_result(score=0, evidence="")
+
+    for strictness in ["strict", "moderate", "lenient"]:
+        monkeypatch.setattr(pipeline.settings, "ai_grading_strictness", strictness)
+        attempt = pipeline._build_grading_attempt(
+            question=question,
+            answer_text="irrelevant answer",
+            extraction_confidence=ConfidenceLevel.high,
+            grading_result=grading_result,
+            raw_response="{}",
+            model="model",
+        )
+
+        assert attempt.score == Decimal("0.00")
+        assert attempt.missing_rubric_evidence is True
+
+
+
+def test_lenient_policy_applies_small_floor_only_with_evidence(monkeypatch) -> None:
+    question = _question_snapshot()
+    monkeypatch.setattr(pipeline.settings, "ai_grading_strictness", "lenient")
+    attempt = pipeline._build_grading_attempt(
+        question=question,
+        answer_text="student attempted point A",
+        extraction_confidence=ConfidenceLevel.high,
+        grading_result=_grading_result(score=0, evidence="student attempted point A"),
+        raw_response="{}",
+        model="model",
+    )
+
+    assert attempt.score == Decimal("0.25")
+
+
+
+def test_small_question_lenient_floor_is_bounded(monkeypatch) -> None:
+    question = QuestionSnapshot(id=5, question_no="1", title="Short", max_score=Decimal("1"), rubric_items=[RubricItemSnapshot(id=10, description="Point", max_score=Decimal("1"))])
+    monkeypatch.setattr(pipeline.settings, "ai_grading_strictness", "lenient")
+
+    attempt = pipeline._build_grading_attempt(
+        question=question,
+        answer_text="attempt",
+        extraction_confidence=ConfidenceLevel.high,
+        grading_result=_grading_result(score=0, evidence="attempt"),
+        raw_response="{}",
+        model="model",
+    )
+
+    assert attempt.score == Decimal("0.05")
+
+
+
 def test_empty_answer_fallback_marks_answer_for_review() -> None:
     question = _question_snapshot()
 
@@ -104,16 +157,24 @@ def test_error_fallback_preserves_error_response_and_review_flag() -> None:
 
 
 def test_extract_submission_answers_uses_student_extraction_route(monkeypatch) -> None:
+    image_path = Path("page.png")
     seen_route_keys: list[str | None] = []
+    seen_prompt_variables: list[dict] = []
+    seen_image_paths: list[list[Path]] = []
 
     def fake_call_structured_json(**kwargs):
         seen_route_keys.append(kwargs.get("route_key"))
+        seen_prompt_variables.append(kwargs.get("prompt_variables"))
+        seen_image_paths.append(kwargs.get("image_paths"))
         return type(
             "Completion",
             (),
             {
                 "data": StudentExtractionResult(student_name="Alice", student_id="S001", answers=[]),
                 "raw_text": "{}",
+                "model": "chosen-vision",
+                "candidate_index": 0,
+                "fallback_used": False,
             },
         )()
 
@@ -122,13 +183,16 @@ def test_extract_submission_answers_uses_student_extraction_route(monkeypatch) -
     result, raw_text = pipeline._extract_submission_answers(
         exam_title="Sample",
         questions_json="[]",
-        image_paths=[],
+        image_paths=[image_path],
+        ocr_reference_text="[Page 1]\nOCR text",
     )
 
     assert result.student_name == "Alice"
     assert raw_text == "{}"
     assert seen_route_keys == ["vision_student_extraction"]
-
+    assert seen_image_paths == [[image_path]]
+    assert "OCR reference text" in seen_prompt_variables[0]["ocr_reference_text"]
+    assert "OCR text" in seen_prompt_variables[0]["ocr_reference_text"]
 
 
 def test_grade_question_uses_grading_route(monkeypatch) -> None:
@@ -157,6 +221,7 @@ def test_grade_question_uses_grading_route(monkeypatch) -> None:
             },
         )()
 
+    monkeypatch.setattr(pipeline.settings, "ai_grading_review_enabled", False)
     monkeypatch.setattr(pipeline, "call_structured_json", fake_call_structured_json)
 
     answer, _rubric_results, _needs_review = pipeline._grade_question(
@@ -170,6 +235,170 @@ def test_grade_question_uses_grading_route(monkeypatch) -> None:
     assert answer.raw_ai_response == "{}"
     assert seen_route_keys == ["grading"]
 
+
+def test_grade_question_uses_image_grounded_review_before_text_review(monkeypatch) -> None:
+    question = _question_snapshot()
+    image_path = Path("page.png")
+    seen_image_paths: list[list[Path] | None] = []
+    seen_route_keys: list[str | None] = []
+
+    def fake_call_structured_json(**kwargs):
+        seen_route_keys.append(kwargs.get("route_key"))
+        seen_image_paths.append(kwargs.get("image_paths"))
+        confidence = ConfidenceLevel.low if kwargs.get("route_key") == "grading" else ConfidenceLevel.high
+        return type(
+            "Completion",
+            (),
+            {
+                "data": type(
+                    "GradingPayload",
+                    (),
+                    {
+                        "rubric_evaluation": [],
+                        "confidence": confidence,
+                        "needs_human_review": kwargs.get("route_key") == "grading",
+                        "missing_points": [],
+                        "final_comment": "",
+                    },
+                )(),
+                "raw_text": "{}",
+                "model": "chosen-model",
+            },
+        )()
+
+    monkeypatch.setattr(pipeline.settings, "ai_grading_review_enabled", True)
+    monkeypatch.setattr(pipeline, "call_structured_json", fake_call_structured_json)
+
+    answer, _rubric_results, _needs_review = pipeline._grade_question(
+        submission_id=7,
+        question=question,
+        answer_text="student answer",
+        source_page=1,
+        extraction_confidence=ConfidenceLevel.high,
+        review_image_paths=[image_path],
+    )
+
+    assert answer.review_decision == "accepted_review"
+    assert seen_route_keys == ["grading", "vision_grading_review"]
+    assert seen_image_paths == [None, [image_path]]
+
+
+def test_grade_question_skips_image_review_without_vision_capable_candidate(monkeypatch) -> None:
+    question = _question_snapshot()
+    seen_route_keys: list[str | None] = []
+
+    def fake_call_structured_json(**kwargs):
+        seen_route_keys.append(kwargs.get("route_key"))
+        confidence = ConfidenceLevel.low if kwargs.get("route_key") == "grading" else ConfidenceLevel.high
+        return type(
+            "Completion",
+            (),
+            {
+                "data": type(
+                    "GradingPayload",
+                    (),
+                    {
+                        "rubric_evaluation": [],
+                        "confidence": confidence,
+                        "needs_human_review": kwargs.get("route_key") == "grading",
+                        "missing_points": [],
+                        "final_comment": "",
+                    },
+                )(),
+                "raw_text": "{}",
+                "model": "chosen-model",
+            },
+        )()
+
+    monkeypatch.setattr(pipeline.settings, "ai_grading_review_enabled", True)
+    monkeypatch.setattr(pipeline, "_has_vision_capable_review_candidate", lambda: False)
+    monkeypatch.setattr(pipeline, "call_structured_json", fake_call_structured_json)
+
+    answer, _rubric_results, _needs_review = pipeline._grade_question(
+        submission_id=7,
+        question=question,
+        answer_text="student answer",
+        source_page=1,
+        extraction_confidence=ConfidenceLevel.high,
+        review_image_paths=[Path("page.png")],
+    )
+
+    assert answer.review_decision == "accepted_review"
+    assert seen_route_keys == ["grading", "grading_review"]
+
+
+
+def test_grade_question_falls_back_to_text_review_when_image_review_fails(monkeypatch) -> None:
+    question = _question_snapshot()
+    seen_route_keys: list[str | None] = []
+
+    def fake_call_structured_json(**kwargs):
+        seen_route_keys.append(kwargs.get("route_key"))
+        if kwargs.get("route_key") == "vision_grading_review":
+            raise RuntimeError("vision failed")
+        confidence = ConfidenceLevel.low if kwargs.get("route_key") == "grading" else ConfidenceLevel.high
+        return type(
+            "Completion",
+            (),
+            {
+                "data": type(
+                    "GradingPayload",
+                    (),
+                    {
+                        "rubric_evaluation": [],
+                        "confidence": confidence,
+                        "needs_human_review": kwargs.get("route_key") == "grading",
+                        "missing_points": [],
+                        "final_comment": "",
+                    },
+                )(),
+                "raw_text": "{}",
+                "model": "chosen-model",
+            },
+        )()
+
+    monkeypatch.setattr(pipeline.settings, "ai_grading_review_enabled", True)
+    monkeypatch.setattr(pipeline, "call_structured_json", fake_call_structured_json)
+
+    answer, _rubric_results, _needs_review = pipeline._grade_question(
+        submission_id=7,
+        question=question,
+        answer_text="student answer",
+        source_page=1,
+        extraction_confidence=ConfidenceLevel.high,
+        review_image_paths=[Path("page.png")],
+    )
+
+    assert answer.review_decision == "accepted_review"
+    assert seen_route_keys == ["grading", "vision_grading_review", "grading_review"]
+
+
+def test_submission_review_image_paths_prefers_source_page_neighbors(tmp_path: Path, monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+    session = SessionLocal()
+    monkeypatch.setattr(pipeline.settings, "storage_dir", tmp_path / "storage")
+    from app.storage.local import get_storage_service
+
+    get_storage_service.cache_clear()
+    try:
+        exam = Exam(title="Sample")
+        session.add(exam)
+        session.flush()
+        submission = Submission(exam_id=exam.id, original_pdf_path="submissions/sample.pdf")
+        session.add(submission)
+        session.flush()
+        for page_no in [1, 2, 3, 4]:
+            session.add(SubmissionPage(submission_id=submission.id, page_no=page_no, image_path=f"rendered/page-{page_no}.png"))
+        session.commit()
+
+        paths = pipeline._submission_review_image_paths(session, submission.id, 2)
+
+        assert [path.name for path in paths] == ["page-1.png", "page-2.png", "page-3.png"]
+    finally:
+        session.close()
+        get_storage_service.cache_clear()
 
 
 def test_process_submission_without_questions_marks_needs_review(monkeypatch) -> None:
@@ -204,7 +433,6 @@ def test_process_submission_without_questions_marks_needs_review(monkeypatch) ->
         assert updated_submission.error_message == "No gradable questions were found for this submission"
     finally:
         session.close()
-
 
 
 def test_recalculate_submission_total_uses_explicit_review_flags_only() -> None:
@@ -246,6 +474,31 @@ def test_recalculate_submission_total_uses_explicit_review_flags_only() -> None:
         assert submission.status == SubmissionStatus.graded.value
     finally:
         session.close()
+
+
+def _grading_result(score: float, evidence: str):
+    return type(
+        "GradingPayload",
+        (),
+        {
+            "rubric_evaluation": [
+                type(
+                    "Evaluation",
+                    (),
+                    {
+                        "rubric_item_id": 10,
+                        "awarded_score": score,
+                        "evidence_from_student_answer": evidence,
+                        "reason": "相关证据" if evidence else "无证据",
+                    },
+                )()
+            ],
+            "confidence": ConfidenceLevel.high,
+            "needs_human_review": False,
+            "missing_points": [],
+            "final_comment": "",
+        },
+    )()
 
 
 

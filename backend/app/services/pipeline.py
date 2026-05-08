@@ -28,6 +28,7 @@ from app.models import (
 )
 from app.schemas.ai import ExtractedQuestion, GradingResult, RubricParseResult, StudentExtractionResult
 from app.services.llm import call_structured_json
+from app.services.ocr import build_ocr_reference_text, format_ocr_reference_text
 from app.services.pdf import RenderedPage, hash_file, render_pdf_to_images
 from app.storage.local import get_storage_service
 from app.utils.score import clamp_score
@@ -118,6 +119,31 @@ def _snapshot_question(question: Question) -> QuestionSnapshot:
     )
 
 
+def _review_image_paths_from_rendered_pages(pages: list[RenderedPage], source_page: int | None) -> list[Path]:
+    if not pages:
+        return []
+    if source_page is None:
+        return [page.image_path for page in pages]
+    selected = [page.image_path for page in pages if abs(page.page_no - source_page) <= 1]
+    return selected or [page.image_path for page in pages]
+
+
+def _submission_review_image_paths(session: Session, submission_id: int, source_page: int | None) -> list[Path]:
+    storage = get_storage_service()
+    pages = session.execute(
+        select(SubmissionPage)
+        .where(SubmissionPage.submission_id == submission_id)
+        .order_by(SubmissionPage.page_no.asc())
+    ).scalars().all()
+    if not pages:
+        return []
+    if source_page is None:
+        selected_pages = pages
+    else:
+        selected_pages = [page for page in pages if abs(page.page_no - source_page) <= 1] or pages
+    return [storage.path_for(page.image_path) for page in selected_pages]
+
+
 def _combine_confidence(*levels: ConfidenceLevel | str | None) -> ConfidenceLevel:
     normalized: list[ConfidenceLevel] = []
     for level in levels:
@@ -200,11 +226,23 @@ def parse_rubric_for_exam(session: Session, exam_id: int, exam_file_id: int | No
         storage.path_for(f"rendered/exams/{exam.id}/rubric/{exam_file.id}"),
         dpi=settings.render_dpi,
     )
+    ocr_started_at = time.perf_counter()
+    ocr_reference_text = build_ocr_reference_text(rendered_pages, "vision_rubric")
+    if ocr_reference_text:
+        logger.info(
+            "Rubric OCR reference built exam_id=%s pages=%s chars=%s duration_seconds=%.2f",
+            exam_id,
+            len(rendered_pages),
+            len(ocr_reference_text),
+            time.perf_counter() - ocr_started_at,
+        )
     prompt_variables = {
         "exam_title": exam.title,
         "teacher_notes": exam.description or "",
+        "ocr_reference_text": format_ocr_reference_text(ocr_reference_text),
     }
     try:
+        vision_started_at = time.perf_counter()
         completion = call_structured_json(
             model=settings.ai_vision_model,
             system_prompt_name="rubric_extraction.system.md",
@@ -214,6 +252,14 @@ def parse_rubric_for_exam(session: Session, exam_id: int, exam_file_id: int | No
             image_paths=[page.image_path for page in rendered_pages],
             request_profile="vision",
             route_key="vision_rubric",
+        )
+        logger.info(
+            "Rubric vision completed exam_id=%s model=%s candidate_index=%s fallback=%s duration_seconds=%.2f",
+            exam_id,
+            completion.model,
+            completion.candidate_index,
+            completion.fallback_used,
+            time.perf_counter() - vision_started_at,
         )
     except Exception as exc:  # noqa: BLE001 - rubric parsing should surface a user-visible failure
         exam_file.error_message = str(exc)
@@ -303,6 +349,7 @@ def process_submission(session: Session, submission_id: int) -> Submission:
         exam_title=exam.title,
         questions_json=question_reference_json,
         image_paths=[page.image_path for page in rendered_pages],
+        ocr_reference_text=build_ocr_reference_text(rendered_pages, "vision_student_extraction"),
     )
     if not submission.student_name:
         submission.student_name = extraction_result.student_name
@@ -355,6 +402,7 @@ def process_submission(session: Session, submission_id: int) -> Submission:
                 answer_text=at,
                 source_page=sp,
                 extraction_confidence=ec,
+                review_image_paths=_review_image_paths_from_rendered_pages(rendered_pages, sp),
             ): q
             for sid, q, at, sp, ec in grading_tasks
         }
@@ -419,6 +467,7 @@ def _grade_question(
     answer_text: str,
     source_page: int | None,
     extraction_confidence: ConfidenceLevel,
+    review_image_paths: list[Path] | None = None,
 ) -> tuple[Answer, list[AnswerRubricResult], bool]:
     if not answer_text.strip():
         started_at = time.perf_counter()
@@ -454,18 +503,25 @@ def _grade_question(
             raw_response="ERROR: Fast grading failed",
         )
 
-    review_triggers = _review_triggers_for_attempt(fast_attempt)
+    review_triggers = _review_triggers_for_attempt(fast_attempt, max_score=question.max_score, answer_text=answer_text)
     review_attempt: GradingAttempt | None = None
     review_decision = "not_required"
     final_attempt = fast_attempt
 
     if settings.ai_grading_review_enabled and review_triggers:
-        review_attempt = _call_grading_model(
+        review_attempt = _call_grading_review_with_images(
             question=question,
             answer_text=answer_text,
             extraction_confidence=extraction_confidence,
-            route_key="grading_review",
+            image_paths=review_image_paths or [],
         )
+        if review_attempt is None:
+            review_attempt = _call_grading_model(
+                question=question,
+                answer_text=answer_text,
+                extraction_confidence=extraction_confidence,
+                route_key="grading_review",
+            )
         if review_attempt is None:
             review_decision = "failed"
         else:
@@ -507,6 +563,64 @@ def _grade_question(
         answer.needs_human_review = True
 
     return answer, final_attempt.rubric_results, answer.needs_human_review
+
+
+def _call_grading_review_with_images(
+    *,
+    question: QuestionSnapshot,
+    answer_text: str,
+    extraction_confidence: ConfidenceLevel,
+    image_paths: list[Path],
+) -> GradingAttempt | None:
+    if not image_paths:
+        logger.info("Image-grounded grading review skipped question_id=%s reason=skipped_no_image", question.id)
+        return None
+    if not _has_vision_capable_review_candidate():
+        logger.info("Image-grounded grading review skipped question_id=%s reason=skipped_no_vision_candidate", question.id)
+        return None
+    started_at = time.perf_counter()
+    grading_model = settings.effective_grading_model_for_route("grading_review")
+    try:
+        strictness = settings.ai_grading_strictness
+        strictness_instructions = _strictness_instructions(strictness)
+        completion = call_structured_json(
+            model=grading_model,
+            system_prompt_name="grading.system.md",
+            user_prompt_name="grading_review.user.md",
+            response_model=GradingResult,
+            prompt_variables={
+                "grading_input_json": json.dumps(_build_grading_input(question, answer_text), ensure_ascii=False, indent=2),
+                "strictness": strictness,
+                "strictness_instructions": strictness_instructions,
+            },
+            image_paths=image_paths,
+            request_profile="vision",
+            route_key="vision_grading_review",
+        )
+        return _build_grading_attempt(
+            question=question,
+            answer_text=answer_text,
+            extraction_confidence=extraction_confidence,
+            grading_result=completion.data,
+            raw_response=completion.raw_text,
+            model=completion.model,
+        )
+    except Exception as exc:  # noqa: BLE001 - review can fall back to text-only grading review
+        logger.exception("Image-grounded grading review failed for question %s: %s", question.id, exc)
+        return None
+    finally:
+        logger.info(
+            "Image-grounded grading review completed question_id=%s question_no=%s model=%s image_count=%s duration_seconds=%.2f",
+            question.id,
+            question.question_no,
+            grading_model,
+            len(image_paths),
+            time.perf_counter() - started_at,
+        )
+
+
+def _has_vision_capable_review_candidate() -> bool:
+    return any(candidate.supports_vision for candidate in settings.ai_model_candidates("vision_grading_review"))
 
 
 def _call_grading_model(
@@ -570,25 +684,29 @@ def _build_grading_attempt(
     awarded_total = Decimal("0")
     missing_points = list(grading_result.missing_points)
     rubric_item_ids_seen: set[int] = set()
+    missing_rubric_evidence = False
 
     for evaluation in grading_result.rubric_evaluation:
         rubric_item_id = _coerce_int(evaluation.rubric_item_id)
         rubric_item = rubric_lookup.get(rubric_item_id)
         if rubric_item is None:
             continue
+        evidence = evaluation.evidence_from_student_answer.strip()
         awarded_score = _to_decimal(clamp_score(float(evaluation.awarded_score), 0.0, float(rubric_item.max_score)))
+        if awarded_score > 0 and not evidence:
+            missing_rubric_evidence = True
+            awarded_score = Decimal("0")
         awarded_total += awarded_score
         rubric_item_ids_seen.add(rubric_item.id)
         rubric_results.append(
             AnswerRubricResult(
                 rubric_item_id=rubric_item.id,
                 awarded_score=awarded_score,
-                evidence=evaluation.evidence_from_student_answer.strip(),
+                evidence=evidence,
                 reason=evaluation.reason.strip(),
             )
         )
 
-    missing_rubric_evidence = False
     for rubric_item in question.rubric_items:
         if rubric_item.id in rubric_item_ids_seen:
             continue
@@ -604,13 +722,12 @@ def _build_grading_attempt(
         if rubric_item.description not in missing_points:
             missing_points.append(rubric_item.description)
 
-    final_score = _to_decimal(clamp_score(float(awarded_total), 0.0, float(question.max_score)))
-    if answer_text.strip():
-        min_score_ratio = 0.15 if settings.ai_grading_strictness == "lenient" else 0.05
-        min_score = _to_decimal(float(question.max_score) * min_score_ratio)
-        if min_score < Decimal("0.5"):
-            min_score = Decimal("0.5")
-        final_score = max(final_score, min_score)
+    final_score = _apply_strictness_score_policy(
+        score=_to_decimal(clamp_score(float(awarded_total), 0.0, float(question.max_score))),
+        question=question,
+        answer_text=answer_text,
+        rubric_results=rubric_results,
+    )
     final_confidence = _combine_confidence(extraction_confidence, grading_result.confidence)
     needs_review = bool(grading_result.needs_human_review or final_confidence == ConfidenceLevel.low)
     if needs_review and grading_result.final_comment.strip() and grading_result.final_comment.strip() not in missing_points:
@@ -630,7 +747,27 @@ def _build_grading_attempt(
     )
 
 
-def _review_triggers_for_attempt(attempt: GradingAttempt) -> list[str]:
+def _apply_strictness_score_policy(
+    *,
+    score: Decimal,
+    question: QuestionSnapshot,
+    answer_text: str,
+    rubric_results: list[AnswerRubricResult],
+) -> Decimal:
+    if not answer_text.strip() or settings.ai_grading_strictness != "lenient":
+        return score
+    if score > 0 or not _has_positive_rubric_evidence(rubric_results):
+        return score
+    floor = _to_decimal(float(question.max_score) * 0.05)
+    cap = _to_decimal(min(float(question.max_score) * 0.1, 0.25))
+    return _to_decimal(clamp_score(float(max(score, min(floor, cap))), 0.0, float(question.max_score)))
+
+
+def _has_positive_rubric_evidence(rubric_results: list[AnswerRubricResult]) -> bool:
+    return any(result.evidence.strip() and result.reason.strip() for result in rubric_results)
+
+
+def _review_triggers_for_attempt(attempt: GradingAttempt, *, max_score: Decimal | None = None, answer_text: str = "") -> list[str]:
     triggers: list[str] = []
     if attempt.confidence == ConfidenceLevel.low:
         triggers.append("low_confidence")
@@ -638,6 +775,8 @@ def _review_triggers_for_attempt(attempt: GradingAttempt) -> list[str]:
         triggers.append("model_requested_review")
     if attempt.missing_rubric_evidence:
         triggers.append("missing_rubric_evidence")
+    if answer_text.strip() and max_score is not None and max_score > 0 and attempt.score <= _to_decimal(float(max_score) * 0.25):
+        triggers.append("non_empty_low_score")
     return triggers
 
 
@@ -693,29 +832,25 @@ def _build_grading_input(question: QuestionSnapshot, answer_text: str) -> dict[s
 def _strictness_instructions(strictness: str) -> str:
     return {
         "lenient": """Grade generously against the answer-template rubric. Rules:
-1. ONLY assess against the provided rubric items — do NOT penalize for concepts not listed in the rubric.
-2. Treat semantic equivalence as correct: if the student's wording means the same thing as the rubric item, award credit even if it uses different terms, order, symbols, or Chinese-English phrasing.
-3. NEVER give 0 to a rubric item unless the student wrote nothing for that question or the answer is entirely unrelated to that rubric item.
-4. If the student attempted a relevant answer for a rubric item, award at least 50% of that item's max_score.
-5. If the student addresses ANY meaningful part of a rubric item's description, award at least 70% of that item's max_score.
-6. If the student covers the main idea of a rubric item with minor omissions or imprecise wording, award at least 80% of that item's max_score.
-7. Award full credit when the answer matches the rubric's core meaning, even if it is shorter than the template answer.
-8. Give the benefit of the doubt for ambiguous phrasing, informal wording, OCR artifacts, or mixed Chinese-English.
-9. Mark missing_points ONLY for rubric item concepts that are completely absent or clearly contradicted by the student's answer.
-10. If a rubric item has multiple sub-points and the student covers at least one, award proportional credit generously (e.g., 2 sub-points, 1 covered = 60%+ score).
-11. The final_comment should be encouraging and note what the student did well, not just what was missed.""",
+1. Assess ONLY against the provided rubric items — do not add extra requirements.
+2. Award credit for semantic equivalence even when wording, symbols, order, or Chinese-English phrasing differ.
+3. Give generous partial credit for relevant attempts, but do not award credit for unrelated, contradictory, or unsupported content.
+4. Every positive awarded_score must cite concrete evidence from the student's answer.
+5. If evidence is ambiguous because of OCR or handwriting, award cautious partial credit and set lower confidence or needs_human_review.
+6. Missing points should list rubric concepts that are absent, contradicted, or unsupported by visible evidence.
+7. The final_comment should be encouraging while clearly noting remaining gaps.""",
         "moderate": """Grade fairly. Rules:
-1. Assess against the provided rubric items only — do not add extra requirements.
-2. NEVER give 0 to a rubric item unless the student wrote nothing for that question. If the student attempted an answer, award at least 20% of the item's max_score.
-3. Award partial credit proportional to how much of the rubric item the student's answer covers.
-4. Mark missing_points for rubric item concepts that are missing or substantially incorrect.
-5. Balance strictness with fairness — if the student shows understanding but expresses it poorly, still award some credit.""",
+1. Assess only against the provided rubric items and do not add extra requirements.
+2. Award partial credit proportional to the relevant evidence the student actually provided.
+3. Answers that are unrelated, purely generic, or contradicted by the rubric may receive 0 for that rubric item.
+4. Every positive awarded_score must cite concrete evidence from the student's answer.
+5. Mark missing_points for concepts that are missing, substantially incorrect, or not supported by evidence.""",
         "strict": """Grade strictly. Rules:
-1. Assess against the provided rubric items precisely.
-2. Award credit only when the student's answer explicitly and accurately matches the rubric item.
-3. Require key terminology and complete reasoning as specified in the rubric.
-4. Mark missing_points for any part of the rubric item that is missing or incorrect.
-5. Even in strict mode, do not give 0 unless the student left the answer blank.""",
+1. Award credit only when the student's answer explicitly and accurately satisfies the rubric item.
+2. Require complete reasoning, key terms, formula structure, units, and calculations when the rubric expects them.
+3. Unrelated, incorrect, unsupported, or purely generic answers should receive 0 for that rubric item.
+4. Every positive awarded_score must cite concrete evidence from the student's answer.
+5. Mark missing_points for any missing, incorrect, or unsupported part of the rubric item.""",
     }.get(strictness, "")
 
 
@@ -778,12 +913,19 @@ def review_answer_with_strong_model(
     if not claimed:
         session.refresh(answer)
         return answer
-    review_attempt = _call_grading_model(
+    review_attempt = _call_grading_review_with_images(
         question=question,
         answer_text=answer.extracted_answer,
         extraction_confidence=ConfidenceLevel(answer.confidence),
-        route_key="grading_review",
+        image_paths=_submission_review_image_paths(session, answer.submission_id, answer.source_page),
     )
+    if review_attempt is None:
+        review_attempt = _call_grading_model(
+            question=question,
+            answer_text=answer.extracted_answer,
+            extraction_confidence=ConfidenceLevel(answer.confidence),
+            route_key="grading_review",
+        )
     answer.review_triggers = triggers
     if review_attempt is None:
         answer.review_decision = "failed"
@@ -862,8 +1004,10 @@ def _extract_submission_answers(
     exam_title: str,
     questions_json: str,
     image_paths: list[Path],
+    ocr_reference_text: str = "",
 ) -> tuple[StudentExtractionResult, str]:
     try:
+        vision_started_at = time.perf_counter()
         completion = call_structured_json(
             model=settings.ai_vision_model,
             system_prompt_name="student_extraction.system.md",
@@ -872,10 +1016,19 @@ def _extract_submission_answers(
             prompt_variables={
                 "exam_title": exam_title,
                 "questions_json": questions_json,
+                "ocr_reference_text": format_ocr_reference_text(ocr_reference_text),
             },
             image_paths=image_paths,
             request_profile="vision",
             route_key="vision_student_extraction",
+        )
+        logger.info(
+            "Student extraction vision completed model=%s candidate_index=%s fallback=%s pages=%s duration_seconds=%.2f",
+            completion.model,
+            completion.candidate_index,
+            completion.fallback_used,
+            len(image_paths),
+            time.perf_counter() - vision_started_at,
         )
         return completion.data, completion.raw_text
     except Exception as exc:  # noqa: BLE001 - fall back to an empty extraction result for manual review

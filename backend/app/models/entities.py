@@ -114,6 +114,7 @@ class BatchSplitCandidate(Base, TimestampMixin):
     needs_review: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     review_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     confirmed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    excluded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     source_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
     source_storage_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

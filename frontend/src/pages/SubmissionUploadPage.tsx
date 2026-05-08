@@ -264,8 +264,9 @@ export function SubmissionUploadPage() {
   const exam = results?.exam
   const selectedTab = BATCH_TABS.find((tab) => tab.mode === activeTab) ?? BATCH_TABS[0]
   const batchPages = activeBatch?.pages.map((page) => ({ label: `Page ${page.page_no}`, url: buildStorageUrl(page.image_path) })) ?? []
+  const activeCandidateDrafts = useMemo(() => candidateDrafts.filter((candidate) => !candidate.excluded), [candidateDrafts])
   const validationError = useMemo(() => validateCandidateDrafts(candidateDrafts, activeBatch?.total_pages ?? null), [candidateDrafts, activeBatch?.total_pages])
-  const canConfirmSplit = Boolean(activeBatch && candidateDrafts.length > 0 && !validationError && candidateDrafts.every((candidate) => candidate.confirmed && candidate.student_name && candidate.student_id))
+  const canConfirmSplit = Boolean(activeBatch && activeCandidateDrafts.length > 0 && !validationError && activeCandidateDrafts.every((candidate) => candidate.confirmed && candidate.student_name && candidate.student_id))
   const canStartBatchGrading = Boolean(activeBatch?.status === 'ready_for_grading' || activeBatch?.status === 'completed_with_errors')
 
   return (
@@ -390,7 +391,7 @@ export function SubmissionUploadPage() {
                   <button
                     type="button"
                     onClick={() => void handleSaveCandidates()}
-                    disabled={batchBusy || candidateDrafts.length === 0 || Boolean(validationError)}
+                    disabled={batchBusy || activeCandidateDrafts.length === 0 || Boolean(validationError)}
                     className="rounded-full border border-ink-900/10 bg-white px-5 py-3 text-sm font-semibold text-ink-950 transition hover:bg-paper disabled:opacity-50"
                   >
                     保存拆分候选
@@ -569,25 +570,43 @@ function CandidateEditor({ candidates, drafts, onChange }: { candidates: BatchSp
       {drafts.map((draft, index) => {
         const original = draft.id ? candidateById.get(draft.id) : null
         const splitConfidence = original?.split_confidence ?? 0
-        const risky = Boolean(original?.needs_review || splitConfidence < 0.75 || original?.error_message)
+        const excluded = Boolean(draft.excluded)
+        const risky = Boolean(!excluded && (original?.needs_review || splitConfidence < 0.75 || original?.error_message))
         return (
-          <div key={draft.id ?? index} className={toClassNames('rounded-2xl border p-4', risky ? 'border-gold-200 bg-gold-50/60' : 'border-ink-900/10 bg-white')}>
-            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-              <div className="font-semibold text-ink-950">候选 #{draft.candidate_index ?? index + 1}</div>
-              <div className="text-xs font-semibold text-ink-700">置信度 {Math.round(splitConfidence * 100)}%</div>
+          <div key={draft.id ?? index} className={toClassNames('rounded-2xl border p-4', excluded ? 'border-ink-900/10 bg-ink-50 opacity-70' : risky ? 'border-gold-200 bg-gold-50/60' : 'border-ink-900/10 bg-white')}>
+            <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div className="min-w-0">
+                <div className="font-semibold text-ink-950">候选 #{draft.candidate_index ?? index + 1}</div>
+                <div className="mt-1 flex flex-wrap items-center gap-2 text-xs font-semibold text-ink-700">
+                  {excluded ? <span className="rounded-full bg-ink-900/10 px-2 py-1">已忽略</span> : null}
+                  <span className="rounded-full bg-white px-2 py-1 ring-1 ring-inset ring-ink-900/10">置信度 {Math.round(splitConfidence * 100)}%</span>
+                </div>
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2 lg:w-56">
+                <ToggleBox label="已确认" checked={draft.confirmed && !excluded} disabled={excluded} onChange={(checked) => onChange(index, { confirmed: checked })} />
+                <ToggleBox label="忽略" checked={excluded} onChange={(checked) => onChange(index, { excluded: checked, confirmed: checked ? false : draft.confirmed })} />
+              </div>
             </div>
-            {original?.error_message ? <InlineMessage message={original.error_message} tone="error" /> : null}
-            {risky ? <div className="mb-3 text-xs font-semibold text-amber-800">该候选需要人工复核后才能确认。</div> : null}
-            <div className="grid gap-3 md:grid-cols-[minmax(6rem,0.7fr)_minmax(6rem,0.7fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.2fr)_auto]">
-              <NumberInput label="起始页" value={draft.start_page} onChange={(value) => onChange(index, { start_page: value })} />
-              <NumberInput label="结束页" value={draft.end_page} onChange={(value) => onChange(index, { end_page: value })} />
-              <TextInput label="学生姓名" value={draft.student_name ?? ''} onChange={(value) => onChange(index, { student_name: value })} />
-              <TextInput label="学号" value={draft.student_id ?? ''} onChange={(value) => onChange(index, { student_id: value })} />
-              <TextInput label="复核备注" value={draft.review_notes ?? ''} onChange={(value) => onChange(index, { review_notes: value })} />
-              <label className="flex items-end gap-2 pb-3 text-sm font-semibold text-ink-800">
-                <input type="checkbox" checked={draft.confirmed} onChange={(event) => onChange(index, { confirmed: event.target.checked })} />
-                已确认
-              </label>
+            {original?.error_message && !excluded ? <InlineMessage message={original.error_message} tone="error" /> : null}
+            {risky ? (
+              <div className="mb-3 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                <div className="font-semibold">该候选需要人工复核后才能确认。</div>
+                {original?.review_notes ? <div className="mt-1">原因：{original.review_notes}</div> : null}
+                <div className="mt-1 text-amber-800">人工确认会覆盖自动拆分风险，但原始置信度和备注会保留用于审计。</div>
+              </div>
+            ) : null}
+            <div className="space-y-4">
+              <div className="grid min-w-0 gap-3 lg:grid-cols-[minmax(13rem,16rem)_minmax(0,1fr)]">
+                <div className="grid min-w-0 grid-cols-2 gap-3 rounded-2xl border border-ink-900/10 bg-white/70 p-3">
+                  <NumberInput label="起始页" value={draft.start_page} disabled={excluded} onChange={(value) => onChange(index, { start_page: value })} />
+                  <NumberInput label="结束页" value={draft.end_page} disabled={excluded} onChange={(value) => onChange(index, { end_page: value })} />
+                </div>
+                <div className="grid min-w-0 gap-3 md:grid-cols-2">
+                  <TextInput label="学生姓名" value={draft.student_name ?? ''} disabled={excluded} onChange={(value) => onChange(index, { student_name: value })} />
+                  <TextInput label="学号" value={draft.student_id ?? ''} disabled={excluded} onChange={(value) => onChange(index, { student_id: value })} />
+                </div>
+              </div>
+              <TextInput label="复核备注" value={draft.review_notes ?? ''} disabled={excluded} onChange={(value) => onChange(index, { review_notes: value })} />
             </div>
           </div>
         )
@@ -635,20 +654,29 @@ function Metric({ label, value }: { label: string; value: string }) {
   )
 }
 
-function TextInput({ label, value, placeholder, onChange }: { label: string; value: string; placeholder?: string; onChange: (value: string) => void }) {
+function TextInput({ label, value, placeholder, disabled = false, onChange }: { label: string; value: string; placeholder?: string; disabled?: boolean; onChange: (value: string) => void }) {
   return (
-    <label className="block space-y-2">
+    <label className="flex min-h-[4.75rem] min-w-0 flex-col justify-between gap-2">
       <span className="text-sm font-semibold text-ink-800">{label}</span>
-      <input value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} className="w-full rounded-2xl border border-ink-900/10 bg-white px-4 py-3 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100" />
+      <input value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} className="h-12 w-full min-w-0 rounded-2xl border border-ink-900/10 bg-white px-4 outline-none transition disabled:bg-ink-50 disabled:text-ink-700 focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100" />
     </label>
   )
 }
 
-function NumberInput({ label, value, onChange }: { label: string; value: number; onChange: (value: number) => void }) {
+function NumberInput({ label, value, disabled = false, onChange }: { label: string; value: number; disabled?: boolean; onChange: (value: number) => void }) {
   return (
-    <label className="block space-y-2">
-      <span className="text-xs font-semibold text-ink-700">{label}</span>
-      <input type="number" min="1" value={value} onChange={(event) => onChange(Math.max(1, Number(event.target.value) || 1))} className="w-full min-w-[6rem] rounded-2xl border border-ink-900/10 bg-white px-3 py-2 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100" />
+    <label className="flex min-h-[4.75rem] min-w-0 flex-col justify-between gap-2">
+      <span className="text-sm font-semibold text-ink-800">{label}</span>
+      <input type="number" min="1" value={value} disabled={disabled} onChange={(event) => onChange(Math.max(1, Number(event.target.value) || 1))} className="h-12 w-full min-w-0 rounded-2xl border border-ink-900/10 bg-white px-4 outline-none transition disabled:bg-ink-50 disabled:text-ink-700 focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100" />
+    </label>
+  )
+}
+
+function ToggleBox({ label, checked, disabled = false, onChange }: { label: string; checked: boolean; disabled?: boolean; onChange: (checked: boolean) => void }) {
+  return (
+    <label className={toClassNames('flex min-h-12 items-center justify-center gap-2 rounded-2xl border border-ink-900/10 bg-white px-3 text-sm font-semibold text-ink-800 transition', disabled && 'cursor-not-allowed bg-ink-50 text-ink-700')}>
+      <input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} />
+      {label}
     </label>
   )
 }
@@ -698,11 +726,12 @@ function candidateToDraft(candidate: BatchSplitCandidate): BatchCandidateUpdateP
     student_id: candidate.student_id,
     review_notes: candidate.review_notes,
     confirmed: candidate.confirmed,
+    excluded: candidate.excluded,
   }
 }
 
 function validateCandidateDrafts(candidates: BatchCandidateUpdatePayload[], totalPages: number | null): string | null {
-  const ranges = [...candidates].sort((left, right) => left.start_page - right.start_page)
+  const ranges = candidates.filter((candidate) => !candidate.excluded).sort((left, right) => left.start_page - right.start_page)
   for (const candidate of ranges) {
     if (candidate.start_page < 1 || candidate.end_page < candidate.start_page) {
       return '候选页段不合法。'

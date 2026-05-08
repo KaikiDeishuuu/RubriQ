@@ -18,9 +18,16 @@ def _settings(**overrides) -> Settings:
         "AI_VISION_RUBRIC_CHAIN": None,
         "AI_VISION_STUDENT_EXTRACTION_CHAIN": None,
         "AI_VISION_SPLIT_HEADER_CHAIN": None,
+        "AI_VISION_GRADING_REVIEW_CHAIN": None,
         "AI_GRADING_CHAIN": None,
         "AI_GRADING_REVIEW_MODEL": None,
         "AI_GRADING_REVIEW_CHAIN": None,
+        "OCR_PREPROCESS_ENABLED": False,
+        "OCR_PREPROCESS_RUBRIC_ENABLED": False,
+        "OCR_PREPROCESS_STUDENT_ENABLED": True,
+        "OCR_PREPROCESS_SPLIT_HEADER_ENABLED": True,
+        "PADDLE_OCR_API_KEY": None,
+        "OCR_SPLIT_HEADER_CONCURRENCY": 4,
     }
     defaults.update(overrides)
     return Settings(**defaults)
@@ -33,6 +40,7 @@ def test_ai_and_render_settings_exist() -> None:
     assert settings.ai_retry_backoff_seconds >= 0
     assert 1 <= settings.ai_grading_concurrency <= 6
     assert 1 <= settings.ai_grading_global_concurrency <= 8
+    assert 1 <= settings.ocr_split_header_concurrency <= 8
 
 
 
@@ -42,12 +50,14 @@ def test_ai_model_candidates_fall_back_to_legacy_single_model() -> None:
     vision_candidates = app_settings.ai_model_candidates("vision_student_extraction")
     grading_candidates = app_settings.ai_model_candidates("grading")
 
-    assert [(candidate.profile, candidate.model, candidate.base_url, candidate.api_key) for candidate in vision_candidates] == [
-        ("vision", "vision-default", "https://base.test/v1", "base-key")
-    ]
-    assert [(candidate.profile, candidate.model, candidate.base_url, candidate.api_key) for candidate in grading_candidates] == [
-        ("grading", "grading-default", "https://base.test/v1", "base-key")
-    ]
+    assert [
+        (candidate.profile, candidate.model, candidate.base_url, candidate.api_key, candidate.supports_vision)
+        for candidate in vision_candidates
+    ] == [("vision", "vision-default", "https://base.test/v1", "base-key", True)]
+    assert [
+        (candidate.profile, candidate.model, candidate.base_url, candidate.api_key, candidate.supports_vision)
+        for candidate in grading_candidates
+    ] == [("grading", "grading-default", "https://base.test/v1", "base-key", False)]
 
 
 
@@ -82,9 +92,9 @@ def test_ai_model_candidates_parse_grading_chain() -> None:
 
     candidates = app_settings.ai_model_candidates("grading")
 
-    assert [(candidate.profile, candidate.model, candidate.base_url, candidate.api_key) for candidate in candidates] == [
-        ("grading", "grader-fast", "https://grading.test/v1", "grading-key"),
-        ("grading", "grader-safe", "https://grading.test/v1", "safe-key"),
+    assert [(candidate.profile, candidate.model, candidate.base_url, candidate.api_key, candidate.supports_vision) for candidate in candidates] == [
+        ("grading", "grader-fast", "https://grading.test/v1", "grading-key", False),
+        ("grading", "grader-safe", "https://grading.test/v1", "safe-key", False),
     ]
 
 
@@ -96,6 +106,22 @@ def test_ai_model_candidates_reject_invalid_chain() -> None:
         app_settings.ai_model_candidates("vision_rubric")
 
 
+
+def test_ai_model_candidates_parse_vision_capability_flags() -> None:
+    app_settings = _settings(
+        AI_VISION_BASE_URL="https://vision.test/v1",
+        AI_VISION_API_KEY="vision-key",
+        AI_VISION_GRADING_REVIEW_CHAIN='[{"model":"text-review","supports_vision":false},{"model":"vision-review","supports_images":"true"}]',
+    )
+
+    candidates = app_settings.ai_model_candidates("vision_grading_review")
+
+    assert [(candidate.model, candidate.supports_vision) for candidate in candidates] == [
+        ("text-review", False),
+        ("vision-review", True),
+    ]
+
+
 def test_ai_model_candidates_use_review_model_for_grading_review_route() -> None:
     app_settings = _settings(
         AI_GRADING_BASE_URL="https://grading.test/v1",
@@ -105,8 +131,8 @@ def test_ai_model_candidates_use_review_model_for_grading_review_route() -> None
 
     candidates = app_settings.ai_model_candidates("grading_review")
 
-    assert [(candidate.profile, candidate.model, candidate.base_url, candidate.api_key) for candidate in candidates] == [
-        ("grading", "grader-strong", "https://grading.test/v1", "grading-key")
+    assert [(candidate.profile, candidate.model, candidate.base_url, candidate.api_key, candidate.supports_vision) for candidate in candidates] == [
+        ("grading", "grader-strong", "https://grading.test/v1", "grading-key", False)
     ]
 
 
@@ -122,9 +148,9 @@ def test_ai_model_candidates_parse_review_chain() -> None:
 
     candidates = app_settings.ai_model_candidates("grading_review")
 
-    assert [(candidate.profile, candidate.model, candidate.base_url, candidate.api_key) for candidate in candidates] == [
-        ("grading", "grader-strong", "https://review.test/v1", "review-key"),
-        ("grading", "grader-backup", "https://grading.test/v1", "grading-key"),
+    assert [(candidate.profile, candidate.model, candidate.base_url, candidate.api_key, candidate.supports_vision) for candidate in candidates] == [
+        ("grading", "grader-strong", "https://review.test/v1", "review-key", False),
+        ("grading", "grader-backup", "https://grading.test/v1", "grading-key", False),
     ]
 
 
@@ -133,6 +159,30 @@ def test_invalid_review_thresholds_are_rejected() -> None:
         _settings(AI_GRADING_REVIEW_SCORE_DELTA_RATIO=1.5)
     with pytest.raises(ValidationError, match="AI_GRADING_REVIEW_VARIANCE_MIN_ANSWERS"):
         _settings(AI_GRADING_REVIEW_VARIANCE_MIN_ANSWERS=1)
+
+
+def test_ocr_preprocess_is_disabled_by_default_and_requires_key() -> None:
+    app_settings = _settings()
+
+    assert app_settings.ocr_preprocess_enabled is False
+    assert app_settings.ocr_enabled_for_route("vision_student_extraction") is False
+
+    enabled_without_key = _settings(OCR_PREPROCESS_ENABLED=True, PADDLE_OCR_API_KEY=None)
+    assert enabled_without_key.ocr_enabled_for_route("vision_student_extraction") is False
+
+    enabled_with_key = _settings(OCR_PREPROCESS_ENABLED=True, PADDLE_OCR_API_KEY="ocr-key")
+    assert enabled_with_key.ocr_enabled_for_route("vision_student_extraction") is True
+    assert enabled_with_key.ocr_enabled_for_route("vision_split_header") is True
+    assert enabled_with_key.ocr_enabled_for_route("vision_rubric") is False
+
+
+def test_invalid_ocr_settings_are_rejected() -> None:
+    with pytest.raises(ValidationError, match="OCR timing settings"):
+        _settings(PADDLE_OCR_TIMEOUT_SECONDS=0)
+    with pytest.raises(ValidationError, match="OCR_SPLIT_HEADER_MIN_CONFIDENCE"):
+        _settings(OCR_SPLIT_HEADER_MIN_CONFIDENCE=1.2)
+    with pytest.raises(ValidationError, match="OCR_SPLIT_HEADER_CONCURRENCY"):
+        _settings(OCR_SPLIT_HEADER_CONCURRENCY=0)
 
 
 def test_invalid_grading_strictness_is_rejected() -> None:

@@ -71,6 +71,8 @@ def call_structured_json(
     candidate_errors: list[str] = []
     for candidate_index, candidate in enumerate(candidates, start=1):
         try:
+            if image_paths and not candidate.supports_vision:
+                raise StructuredJsonError("AI model candidate does not support image input")
             return _call_structured_json_candidate(
                 candidate=candidate,
                 candidate_index=candidate_index,
@@ -117,6 +119,7 @@ def _resolve_model_candidates(
                 model=model,
                 base_url=settings.effective_vision_base_url,
                 api_key=settings.effective_vision_api_key,
+                supports_vision=True,
             )
         ]
     return [
@@ -125,6 +128,7 @@ def _resolve_model_candidates(
             model=model,
             base_url=settings.effective_grading_base_url,
             api_key=settings.effective_grading_api_key,
+            supports_vision=False,
         )
     ]
 

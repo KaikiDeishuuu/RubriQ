@@ -36,6 +36,7 @@ class BatchSplitCandidateRead(BaseSchema):
     needs_review: bool
     review_notes: str | None = None
     confirmed: bool
+    excluded: bool = False
     source_filename: str | None = None
     source_storage_path: str | None = None
     error_message: str | None = None
@@ -78,6 +79,7 @@ class BatchCandidateUpdate(BaseSchema):
     student_id: str | None = None
     review_notes: str | None = None
     confirmed: bool = False
+    excluded: bool = False
 
 
 class BatchCandidatesUpdateRequest(BaseSchema):

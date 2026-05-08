@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
 import re
+import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -25,12 +28,32 @@ from app.models import (
 from app.schemas.ai import PageHeaderExtraction
 from app.schemas.batch import BatchCandidateUpdate
 from app.services.llm import call_structured_json
+from app.services.ocr import HeaderOCRDiagnostic, extract_header_text_diagnostic, format_ocr_reference_text
 from app.services.pipeline import _to_decimal, review_answer_with_strong_model
 from app.services.pdf import crop_top_region, get_pdf_page_count, hash_file, render_pdf_to_images, split_pdf_pages
 from app.storage.local import get_storage_service
 from app.utils.files import PDF_SIGNATURE, sanitize_filename
 
+logger = logging.getLogger(__name__)
+
 SPLIT_CONFIDENCE_THRESHOLD = 0.75
+MAX_REASONABLE_SPLIT_PAGE_NUMBER = 200
+_STUDENT_NAME_NOISE_TOKENS = {"姓名", "学生", "学号", "学籍号", "考号", "页码", "第", "页面"}
+_STUDENT_ID_NOISE_TOKENS = {
+    "answer",
+    "batch",
+    "exam",
+    "grade",
+    "grading",
+    "page",
+    "paper",
+    "question",
+    "quiz",
+    "score",
+    "student",
+    "submission",
+    "test",
+}
 ACTIVE_SUBMISSION_STATUSES = {
     SubmissionStatus.processing.value,
     SubmissionStatus.rendering.value,
@@ -63,6 +86,25 @@ class ParsedStudentIdentity:
     student_id: str | None
     student_name: str | None
     confidence: float
+
+
+@dataclass(slots=True)
+class RenderedHeaderCrop:
+    page_no: int
+    page_image_path: Path
+    crop_path: Path
+    extracted_text: str
+
+
+@dataclass(slots=True)
+class HeaderExtractionResult:
+    page_no: int
+    page_image_path: Path
+    crop_path: Path
+    extracted_text: str
+    header_data: dict[str, Any]
+    raw_text: str
+    error_message: str | None
 
 
 def load_batch_detail(session: Session, batch_id: int) -> SubmissionBatch:
@@ -125,7 +167,9 @@ def update_batch_candidates(
     batch = load_batch_detail(session, batch_id)
     if batch.status in {BatchStatus.grading.value, BatchStatus.completed.value}:
         raise BatchPipelineError("Cannot edit split candidates after grading has started")
-    _validate_candidate_ranges(updates, batch.total_pages)
+    active_updates = [update for update in updates if not update.excluded]
+    if active_updates:
+        _validate_candidate_ranges(active_updates, batch.total_pages)
     existing = {candidate.id: candidate for candidate in batch.candidates}
     for fallback_index, update in enumerate(updates, start=1):
         if update.id is not None and update.id in existing:
@@ -139,24 +183,28 @@ def update_batch_candidates(
         candidate.student_name = _clean_optional(update.student_name)
         candidate.student_id = _clean_optional(update.student_id)
         candidate.review_notes = _clean_optional(update.review_notes)
-        candidate.confirmed = update.confirmed
-        candidate.needs_review = not update.confirmed or not candidate.student_name or not candidate.student_id
-        if update.confirmed and candidate.split_confidence < SPLIT_CONFIDENCE_THRESHOLD:
+        candidate.excluded = update.excluded
+        candidate.confirmed = update.confirmed and not update.excluded
+        candidate.needs_review = not candidate.confirmed or not candidate.student_name or not candidate.student_id
+        if candidate.excluded:
+            candidate.needs_review = True
+        elif candidate.confirmed and candidate.split_confidence < SPLIT_CONFIDENCE_THRESHOLD:
             candidate.needs_review = False
     batch.split_version += 1
-    batch.status = BatchStatus.split_ready.value if all(candidate.confirmed for candidate in batch.candidates) else _split_status_for_candidates(list(batch.candidates))
+    batch.status = _split_status_for_candidates(list(batch.candidates))
     session.commit()
     return load_batch_detail(session, batch.id)
 
 
 def confirm_batch_split(session: Session, batch_id: int) -> BatchConfirmResult:
     batch = load_batch_detail(session, batch_id)
-    if not batch.candidates:
-        raise BatchPipelineError("No split candidates are available for confirmation")
-    unconfirmed = [candidate for candidate in batch.candidates if not candidate.confirmed]
+    active_candidates = _active_candidates(list(batch.candidates))
+    if not active_candidates:
+        raise BatchPipelineError("At least one non-ignored split candidate is required")
+    unconfirmed = [candidate for candidate in active_candidates if not candidate.confirmed]
     if unconfirmed:
-        raise BatchPipelineError("All split candidates must be confirmed before grading")
-    invalid = [candidate for candidate in batch.candidates if not candidate.student_name or not candidate.student_id]
+        raise BatchPipelineError("All non-ignored split candidates must be confirmed before grading")
+    invalid = [candidate for candidate in active_candidates if not candidate.student_name or not candidate.student_id]
     if invalid:
         raise BatchPipelineError("All confirmed split candidates must have student name and ID")
 
@@ -166,7 +214,7 @@ def confirm_batch_split(session: Session, batch_id: int) -> BatchConfirmResult:
     created_count = 0
     failed_count = 0
     if batch.mode == BatchUploadMode.zip.value:
-        for candidate in batch.candidates:
+        for candidate in active_candidates:
             try:
                 submission = candidate.submission
                 if submission is None:
@@ -188,7 +236,7 @@ def confirm_batch_split(session: Session, batch_id: int) -> BatchConfirmResult:
         storage = get_storage_service()
         source_path = storage.path_for(batch.source_storage_path)
         output_dir = storage.path_for(f"exams/{batch.exam_id}/batches/{batch.id}/submissions")
-        page_ranges = [(candidate.start_page, candidate.end_page) for candidate in batch.candidates]
+        page_ranges = [(candidate.start_page, candidate.end_page) for candidate in active_candidates]
         try:
             split_paths = split_pdf_pages(source_path, page_ranges, output_dir)
         except Exception as exc:
@@ -196,7 +244,7 @@ def confirm_batch_split(session: Session, batch_id: int) -> BatchConfirmResult:
             batch.error_message = str(exc)
             session.commit()
             raise BatchPipelineError(f"Failed to split combined PDF: {exc}") from exc
-        for candidate, split_path in zip(batch.candidates, split_paths, strict=True):
+        for candidate, split_path in zip(active_candidates, split_paths, strict=True):
             try:
                 relative_path = storage.relative_path_for(split_path)
                 candidate.source_storage_path = relative_path
@@ -426,7 +474,7 @@ def _prepare_zip_batch(session: Session, batch: SubmissionBatch) -> None:
     batch.total_pages = len(batch.pages)
     if candidate_count == 0:
         raise BatchPipelineError("ZIP file does not contain any PDF files")
-    batch.status = BatchStatus.needs_split_review.value if failed_count or any(c.needs_review for c in batch.candidates) else BatchStatus.split_ready.value
+    batch.status = _split_status_for_candidates(list(batch.candidates)) if failed_count == 0 else BatchStatus.needs_split_review.value
     session.commit()
 
 
@@ -482,41 +530,32 @@ def _prepare_auto_split_batch(session: Session, batch: SubmissionBatch) -> None:
         storage.path_for(f"rendered/batches/{batch.id}/pages"),
         dpi=settings.render_dpi,
     )
-    header_results: list[dict[str, Any]] = []
-    for rendered_page in rendered_pages:
-        crop_path = crop_top_region(
-            rendered_page.image_path,
-            storage.path_for(f"rendered/batches/{batch.id}/headers/page-{rendered_page.page_no:03d}.png"),
+    header_crops = [
+        RenderedHeaderCrop(
+            page_no=rendered_page.page_no,
+            page_image_path=rendered_page.image_path,
+            crop_path=crop_top_region(
+                rendered_page.image_path,
+                storage.path_for(f"rendered/batches/{batch.id}/headers/page-{rendered_page.page_no:03d}.png"),
+            ),
+            extracted_text=rendered_page.extracted_text,
         )
-        try:
-            completion = call_structured_json(
-                model=settings.ai_vision_model,
-                system_prompt_name="split_header_detection.system.md",
-                user_prompt_name="split_header_detection.user.md",
-                response_model=PageHeaderExtraction,
-                prompt_variables={"page_no": rendered_page.page_no},
-                image_paths=[crop_path],
-                request_profile="vision",
-                route_key="vision_split_header",
-            )
-            header_data = completion.data.model_dump(mode="json")
-            raw_text = completion.raw_text
-            error_message = None
-        except Exception as exc:
-            header_data = PageHeaderExtraction().model_dump(mode="json")
-            raw_text = f"ERROR: {exc}"
-            error_message = str(exc)
-        header_results.append(header_data)
+        for rendered_page in rendered_pages
+    ]
+    header_extractions = _extract_headers_for_auto_split(header_crops)
+    header_results: list[dict[str, Any]] = []
+    for extraction in header_extractions:
+        header_results.append(extraction.header_data)
         session.add(
             BatchPage(
                 batch_id=batch.id,
-                page_no=rendered_page.page_no,
-                image_path=storage.relative_path_for(rendered_page.image_path),
-                page_hash=hash_file(rendered_page.image_path),
-                extracted_text=rendered_page.extracted_text,
-                header_extraction_json=header_data,
-                raw_ai_response=raw_text,
-                error_message=error_message,
+                page_no=extraction.page_no,
+                image_path=storage.relative_path_for(extraction.page_image_path),
+                page_hash=hash_file(extraction.page_image_path),
+                extracted_text=extraction.extracted_text,
+                header_extraction_json=extraction.header_data,
+                raw_ai_response=extraction.raw_text,
+                error_message=extraction.error_message,
             )
         )
     batch.total_pages = len(rendered_pages)
@@ -526,19 +565,224 @@ def _prepare_auto_split_batch(session: Session, batch: SubmissionBatch) -> None:
     session.commit()
 
 
+def _extract_headers_for_auto_split(header_crops: list[RenderedHeaderCrop]) -> list[HeaderExtractionResult]:
+    if not header_crops:
+        return []
+    max_workers = min(settings.ocr_split_header_concurrency, len(header_crops))
+    logger.info(
+        "Batch split header extraction starting total_pages=%s max_workers=%s",
+        len(header_crops),
+        max_workers,
+    )
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        return sorted(executor.map(_extract_single_header_for_auto_split, header_crops), key=lambda result: result.page_no)
+
+
+def _extract_single_header_for_auto_split(header_crop: RenderedHeaderCrop) -> HeaderExtractionResult:
+    started_at = time.perf_counter()
+    used_vision_fallback = False
+    ocr_diagnostic = HeaderOCRDiagnostic(text=None, reason="not_started")
+    ocr_acceptance_reason = "not_started"
+    try:
+        ocr_diagnostic = extract_header_text_diagnostic(header_crop.crop_path, page_hash=hash_file(header_crop.crop_path))
+        header_ocr_text = ocr_diagnostic.text
+        ocr_header = _header_extraction_from_ocr_text(header_crop.page_no, header_ocr_text or "")
+        ocr_acceptance_reason = _header_ocr_acceptance_reason(ocr_diagnostic, ocr_header)
+        if ocr_acceptance_reason == "ocr_accepted":
+            header_data = ocr_header.model_dump(mode="json")
+            raw_text = f"OCR_HEADER: {header_ocr_text}"
+            error_message = None
+        else:
+            used_vision_fallback = True
+            completion = call_structured_json(
+                model=settings.ai_vision_model,
+                system_prompt_name="split_header_detection.system.md",
+                user_prompt_name="split_header_detection.user.md",
+                response_model=PageHeaderExtraction,
+                prompt_variables={
+                    "page_no": header_crop.page_no,
+                    "ocr_reference_text": format_ocr_reference_text(header_ocr_text),
+                },
+                image_paths=[header_crop.crop_path],
+                request_profile="vision",
+                route_key="vision_split_header",
+            )
+            header_data = completion.data.model_dump(mode="json")
+            raw_text = completion.raw_text
+            error_message = None
+    except Exception as exc:  # noqa: BLE001 - a single page failure should not fail the whole batch
+        header_data = PageHeaderExtraction().model_dump(mode="json")
+        raw_text = f"ERROR: {exc}"
+        error_message = str(exc)
+    logger.info(
+        "Batch split header extraction completed page_no=%s used_vision_fallback=%s ocr_reason=%s fallback_reason=%s ocr_cache_hit=%s ocr_text_chars=%s ocr_error=%s failed=%s duration_seconds=%.2f",
+        header_crop.page_no,
+        used_vision_fallback,
+        ocr_diagnostic.reason,
+        ocr_acceptance_reason,
+        ocr_diagnostic.cache_hit,
+        ocr_diagnostic.text_chars,
+        ocr_diagnostic.error_message,
+        error_message is not None,
+        time.perf_counter() - started_at,
+    )
+    return HeaderExtractionResult(
+        page_no=header_crop.page_no,
+        page_image_path=header_crop.page_image_path,
+        crop_path=header_crop.crop_path,
+        extracted_text=header_crop.extracted_text,
+        header_data=header_data,
+        raw_text=raw_text,
+        error_message=error_message,
+    )
+
+
+def _header_ocr_acceptance_reason(ocr_diagnostic: HeaderOCRDiagnostic, ocr_header: PageHeaderExtraction) -> str:
+    if not ocr_diagnostic.text:
+        return ocr_diagnostic.reason
+    if not ocr_header.student_name.value and not ocr_header.student_id.value:
+        return "regex_no_identity"
+    if not ocr_header.student_name.value:
+        return "regex_no_student_name"
+    if not ocr_header.student_id.value:
+        return "regex_no_student_id"
+    if ocr_header.overall_confidence < settings.ocr_split_header_min_confidence:
+        return "ocr_low_confidence"
+    return "ocr_accepted"
+
+
+def _header_extraction_from_ocr_text(page_no: int, text: str) -> PageHeaderExtraction:
+    cleaned = " ".join(text.split())
+    if not cleaned:
+        return PageHeaderExtraction()
+    student_id = _extract_student_id(cleaned)
+    student_name = _extract_student_name(cleaned, student_id)
+    page_number = _extract_page_number(cleaned) or page_no
+    field_count = sum(1 for value in [student_name, student_id] if value)
+    confidence = 0.0
+    if field_count == 2:
+        confidence = 0.9
+    elif field_count == 1:
+        confidence = 0.55
+    page_confidence = 0.9 if page_number == 1 else 0.35
+    return PageHeaderExtraction.model_validate(
+        {
+            "student_name": {"value": student_name, "confidence": confidence if student_name else 0.0},
+            "student_id": {"value": student_id, "confidence": confidence if student_id else 0.0},
+            "quiz_title": {"value": None, "confidence": 0.0},
+            "page_number": {"value": page_number, "confidence": page_confidence},
+            "is_first_page_confidence": page_confidence,
+            "overall_confidence": min(confidence, page_confidence) if field_count == 2 else confidence,
+        }
+    )
+
+
+def _extract_student_id(text: str) -> str | None:
+    labelled = re.search(r"(?:学号|student\s*id|student\s*no\.?|学籍号|考号|id)[:：#\s]*([A-Za-z0-9][A-Za-z0-9_\-]{3,24})", text, flags=re.IGNORECASE)
+    if labelled:
+        return _clean_student_id(labelled.group(1))
+    for match in re.finditer(r"\b(?=[A-Za-z0-9_\-]*\d)[A-Za-z0-9][A-Za-z0-9_\-]{5,17}\b", text):
+        candidate = _clean_student_id(match.group(0))
+        if candidate and not _looks_like_student_id_noise(candidate):
+            return candidate
+    return None
+
+
+def _clean_student_id(candidate: str | None) -> str | None:
+    cleaned = re.sub(r"[^A-Za-z0-9_-]", "", candidate or "").strip("_-")
+    return cleaned or None
+
+
+def _looks_like_student_id_noise(candidate: str) -> bool:
+    normalized = candidate.casefold().strip("_-")
+    if normalized in _STUDENT_ID_NOISE_TOKENS:
+        return True
+    if any(token in normalized for token in _STUDENT_ID_NOISE_TOKENS) and not re.search(r"\d{3,}", normalized):
+        return True
+    if re.fullmatch(r"20\d{2}[-_/]?(?:0?[1-9]|1[0-2])[-_/]?(?:0?[1-9]|[12]\d|3[01])", normalized):
+        return True
+    if re.fullmatch(r"\d{1,3}[-_/]\d{1,3}", normalized):
+        return True
+    return False
+
+
+def _extract_student_name(text: str, student_id: str | None) -> str | None:
+    labelled = re.search(r"(?:姓名|学生|name)[:：\s]*([一-鿿A-Za-z][一-鿿A-Za-z\s·]{1,24})", text, flags=re.IGNORECASE)
+    if labelled:
+        return _clean_student_name(labelled.group(1), student_id)
+    if student_id:
+        before_id = text.split(student_id, 1)[0]
+        chinese_names = re.findall(r"[一-鿿]{2,4}", before_id)
+        for candidate in reversed(chinese_names):
+            if candidate not in _STUDENT_NAME_NOISE_TOKENS:
+                return candidate
+    return None
+
+
+def _extract_page_number(text: str) -> int | None:
+    labelled = re.search(r"(?:页码|第\s*|page|p\.)[:：\s]*(\d{1,3})", text, flags=re.IGNORECASE)
+    if labelled:
+        return _clean_page_number(labelled.group(1))
+    fraction = re.search(r"\b(\d{1,3})\s*/\s*(\d{1,3})\b", text)
+    if fraction:
+        page_number = _clean_page_number(fraction.group(1))
+        total_pages = _clean_page_number(fraction.group(2))
+        if page_number is not None and total_pages is not None and page_number <= total_pages:
+            return page_number
+    return None
+
+
+def _clean_page_number(value: str | int | None) -> int | None:
+    try:
+        page_number = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    if page_number < 1 or page_number > MAX_REASONABLE_SPLIT_PAGE_NUMBER:
+        return None
+    return page_number
+
+
+def _clean_student_name(name: str, student_id: str | None) -> str | None:
+    cleaned = re.split(r"学号|student\s*id|id|页码|page", name, flags=re.IGNORECASE)[0]
+    if student_id:
+        cleaned = cleaned.replace(student_id, "")
+    cleaned = _clean_optional(cleaned)
+    return cleaned[:24] if cleaned else None
+
+
 def _create_auto_split_candidates(session: Session, batch: SubmissionBatch, headers: list[dict[str, Any]]) -> None:
     starts: list[int] = []
     previous_identity: tuple[str | None, str | None] = (None, None)
+    previous_page_number: int | None = None
+    previous_quiz_title: str | None = None
     for index, header in enumerate(headers, start=1):
         identity = _identity_from_header(header)
-        page_number = _header_value(header, "page_number")
+        normalized_identity = _normalize_header_identity(identity)
+        normalized_previous = _normalize_header_identity(previous_identity)
+        page_number = _clean_page_number(_header_value(header, "page_number"))
         first_page_confidence = float(header.get("is_first_page_confidence") or 0.0)
-        is_first_page = first_page_confidence >= SPLIT_CONFIDENCE_THRESHOLD or str(page_number or "").strip() in {"1", "1.0"}
-        identity_changed = index == 1 or (identity != (None, None) and identity != previous_identity)
-        if index == 1 or is_first_page or identity_changed:
+        same_identity = _same_header_identity(normalized_identity, normalized_previous)
+        identity_changed = normalized_identity != (None, None) and normalized_previous != (None, None) and not same_identity
+        quiz_title = _normalize_quiz_title(_string_or_none(_header_value(header, "quiz_title")))
+        quiz_continues = bool(quiz_title and previous_quiz_title and quiz_title == previous_quiz_title)
+        page_continues = bool(page_number is not None and previous_page_number is not None and page_number >= previous_page_number)
+        high_confidence_first_page = first_page_confidence >= SPLIT_CONFIDENCE_THRESHOLD
+        page_reset = page_number == 1 and previous_page_number not in {None, 1}
+        identity_missing_after_known_student = normalized_identity == (None, None) and normalized_previous != (None, None)
+        continuity_guard = identity_missing_after_known_student and not page_reset and (quiz_continues or page_continues)
+        is_first_page = high_confidence_first_page or page_reset
+        if index == 1:
             starts.append(index)
-        if identity != (None, None):
+        elif identity_changed:
+            starts.append(index)
+        elif is_first_page and not same_identity and not continuity_guard:
+            starts.append(index)
+        if normalized_identity != (None, None):
             previous_identity = identity
+        if page_number is not None:
+            previous_page_number = page_number
+        if quiz_title:
+            previous_quiz_title = quiz_title
     starts = sorted(set(starts)) or [1]
     candidate_index = 0
     for start, next_start in zip(starts, starts[1:] + [len(headers) + 1], strict=True):
@@ -662,7 +906,7 @@ def _clear_batch_children(session: Session, batch_id: int, *, clear_submissions:
 
 def _validate_candidate_ranges(updates: list[BatchCandidateUpdate], total_pages: int | None) -> None:
     if not updates:
-        raise BatchPipelineError("At least one split candidate is required")
+        raise BatchPipelineError("At least one non-ignored split candidate is required")
     normalized: list[tuple[int, int]] = []
     for update in updates:
         if update.start_page < 1 or update.end_page < update.start_page:
@@ -676,11 +920,43 @@ def _validate_candidate_ranges(updates: list[BatchCandidateUpdate], total_pages:
 
 
 def _split_status_for_candidates(candidates: list[BatchSplitCandidate]) -> str:
-    if any(candidate.error_message for candidate in candidates):
+    active_candidates = _active_candidates(candidates)
+    if not active_candidates:
         return BatchStatus.needs_split_review.value
-    if any(candidate.needs_review or not candidate.confirmed for candidate in candidates):
+    if any(candidate.error_message for candidate in active_candidates):
+        return BatchStatus.needs_split_review.value
+    if any(candidate.needs_review or not candidate.confirmed for candidate in active_candidates):
         return BatchStatus.needs_split_review.value
     return BatchStatus.split_ready.value
+
+
+def _active_candidates(candidates: list[BatchSplitCandidate]) -> list[BatchSplitCandidate]:
+    return [candidate for candidate in candidates if not candidate.excluded]
+
+
+def _normalize_header_identity(identity: tuple[str | None, str | None]) -> tuple[str | None, str | None]:
+    student_name, student_id = identity
+    normalized_name = re.sub(r"\s+", "", student_name or "").casefold() or None
+    normalized_id = re.sub(r"\s+", "", student_id or "").casefold() or None
+    return normalized_name, normalized_id
+
+
+def _normalize_quiz_title(title: str | None) -> str | None:
+    normalized = re.sub(r"\s+", "", title or "").casefold()
+    return normalized or None
+
+
+def _same_header_identity(
+    current: tuple[str | None, str | None],
+    previous: tuple[str | None, str | None],
+) -> bool:
+    current_name, current_id = current
+    previous_name, previous_id = previous
+    if current_id and previous_id:
+        return current_id == previous_id
+    if current_name and previous_name:
+        return current_name == previous_name
+    return False
 
 
 def _zip_entry_escapes(filename: str) -> bool:

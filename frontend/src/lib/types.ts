@@ -173,6 +173,7 @@ export interface BatchSplitCandidate {
   needs_review: boolean
   review_notes: string | null
   confirmed: boolean
+  excluded: boolean
   source_filename: string | null
   source_storage_path: string | null
   error_message: string | null
@@ -215,6 +216,7 @@ export interface BatchCandidateUpdatePayload {
   student_id?: string | null
   review_notes?: string | null
   confirmed: boolean
+  excluded?: boolean
 }
 
 export interface BatchConfirmResponse {

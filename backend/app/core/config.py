@@ -12,7 +12,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
 AIRequestProfile = Literal["vision", "grading"]
-AIRouteKey = Literal["vision_rubric", "vision_student_extraction", "vision_split_header", "grading", "grading_review"]
+AIRouteKey = Literal[
+    "vision_rubric",
+    "vision_student_extraction",
+    "vision_split_header",
+    "vision_grading_review",
+    "grading",
+    "grading_review",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +28,7 @@ class AIModelCandidate:
     model: str
     base_url: str
     api_key: str
+    supports_vision: bool
 
 
 class Settings(BaseSettings):
@@ -50,8 +58,25 @@ class Settings(BaseSettings):
     ai_vision_rubric_chain: str | None = Field(default=None, alias="AI_VISION_RUBRIC_CHAIN")
     ai_vision_student_extraction_chain: str | None = Field(default=None, alias="AI_VISION_STUDENT_EXTRACTION_CHAIN")
     ai_vision_split_header_chain: str | None = Field(default=None, alias="AI_VISION_SPLIT_HEADER_CHAIN")
+    ai_vision_grading_review_chain: str | None = Field(default=None, alias="AI_VISION_GRADING_REVIEW_CHAIN")
     ai_grading_chain: str | None = Field(default=None, alias="AI_GRADING_CHAIN")
     ai_grading_review_chain: str | None = Field(default=None, alias="AI_GRADING_REVIEW_CHAIN")
+    ocr_preprocess_enabled: bool = Field(default=False, alias="OCR_PREPROCESS_ENABLED")
+    ocr_preprocess_rubric_enabled: bool = Field(default=False, alias="OCR_PREPROCESS_RUBRIC_ENABLED")
+    ocr_preprocess_student_enabled: bool = Field(default=True, alias="OCR_PREPROCESS_STUDENT_ENABLED")
+    ocr_preprocess_split_header_enabled: bool = Field(default=True, alias="OCR_PREPROCESS_SPLIT_HEADER_ENABLED")
+    paddle_ocr_base_url: str = Field(
+        default="https://paddleocr.aistudio-app.com/api/v2/ocr/jobs",
+        alias="PADDLE_OCR_BASE_URL",
+    )
+    paddle_ocr_api_key: str | None = Field(default=None, alias="PADDLE_OCR_API_KEY")
+    paddle_ocr_model: str = Field(default="PaddleOCR-VL-1.5", alias="PADDLE_OCR_MODEL")
+    paddle_ocr_timeout_seconds: float = Field(default=120.0, alias="PADDLE_OCR_TIMEOUT_SECONDS")
+    paddle_ocr_poll_interval_seconds: float = Field(default=5.0, alias="PADDLE_OCR_POLL_INTERVAL_SECONDS")
+    paddle_ocr_max_poll_seconds: float = Field(default=120.0, alias="PADDLE_OCR_MAX_POLL_SECONDS")
+    ocr_min_text_chars_for_reference: int = Field(default=80, alias="OCR_MIN_TEXT_CHARS_FOR_REFERENCE")
+    ocr_split_header_min_confidence: float = Field(default=0.75, alias="OCR_SPLIT_HEADER_MIN_CONFIDENCE")
+    ocr_split_header_concurrency: int = Field(default=4, alias="OCR_SPLIT_HEADER_CONCURRENCY")
 
     @field_validator("ai_grading_strictness")
     @classmethod
@@ -87,6 +112,34 @@ class Settings(BaseSettings):
     def _validate_review_min_answers(cls, value: int) -> int:
         if value < 2:
             raise ValueError("AI_GRADING_REVIEW_VARIANCE_MIN_ANSWERS must be at least 2")
+        return value
+
+    @field_validator("paddle_ocr_timeout_seconds", "paddle_ocr_poll_interval_seconds", "paddle_ocr_max_poll_seconds")
+    @classmethod
+    def _validate_ocr_timing(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("OCR timing settings must be greater than 0")
+        return value
+
+    @field_validator("ocr_min_text_chars_for_reference")
+    @classmethod
+    def _validate_ocr_min_text_chars(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("OCR_MIN_TEXT_CHARS_FOR_REFERENCE must be at least 0")
+        return value
+
+    @field_validator("ocr_split_header_min_confidence")
+    @classmethod
+    def _validate_ocr_split_confidence(cls, value: float) -> float:
+        if value < 0 or value > 1:
+            raise ValueError("OCR_SPLIT_HEADER_MIN_CONFIDENCE must be between 0 and 1")
+        return value
+
+    @field_validator("ocr_split_header_concurrency")
+    @classmethod
+    def _validate_ocr_split_header_concurrency(cls, value: int) -> int:
+        if value < 1 or value > 8:
+            raise ValueError("OCR_SPLIT_HEADER_CONCURRENCY must be between 1 and 8")
         return value
 
     api_v1_prefix: str = Field(default="/api", alias="API_V1_PREFIX")
@@ -129,6 +182,17 @@ class Settings(BaseSettings):
     def effective_grading_api_key(self) -> str:
         return self.ai_grading_api_key or self.ai_api_key
 
+    def ocr_enabled_for_route(self, route_key: AIRouteKey) -> bool:
+        if not self.ocr_preprocess_enabled or not self.paddle_ocr_api_key:
+            return False
+        if route_key == "vision_rubric":
+            return self.ocr_preprocess_rubric_enabled
+        if route_key == "vision_student_extraction":
+            return self.ocr_preprocess_student_enabled
+        if route_key == "vision_split_header":
+            return self.ocr_preprocess_split_header_enabled
+        return False
+
     def ai_model_candidates(self, route_key: AIRouteKey) -> list[AIModelCandidate]:
         profile = _route_profile(route_key)
         chain_value = self._route_chain_value(route_key)
@@ -141,6 +205,7 @@ class Settings(BaseSettings):
                     model=self.ai_vision_model,
                     base_url=self.effective_vision_base_url,
                     api_key=self.effective_vision_api_key,
+                    supports_vision=True,
                 )
             ]
         return [
@@ -149,6 +214,7 @@ class Settings(BaseSettings):
                 model=self.effective_grading_model_for_route(route_key),
                 base_url=self.effective_grading_base_url,
                 api_key=self.effective_grading_api_key,
+                supports_vision=False,
             )
         ]
 
@@ -159,6 +225,8 @@ class Settings(BaseSettings):
             return self.ai_vision_student_extraction_chain
         if route_key == "vision_split_header" and self.ai_vision_split_header_chain:
             return self.ai_vision_split_header_chain
+        if route_key == "vision_grading_review" and self.ai_vision_grading_review_chain:
+            return self.ai_vision_grading_review_chain
         if _route_profile(route_key) == "vision" and self.ai_vision_chain:
             return self.ai_vision_chain
         if route_key == "grading_review" and self.ai_grading_review_chain:
@@ -183,7 +251,16 @@ class Settings(BaseSettings):
                 raise ValueError(f"AI model chain candidate #{index} must include a model")
             base_url = _clean_optional_string(raw_candidate.get("base_url")) or self._default_base_url_for_profile(profile)
             api_key = _clean_optional_string(raw_candidate.get("api_key")) or self._default_api_key_for_profile(profile)
-            candidates.append(AIModelCandidate(profile=profile, model=model, base_url=base_url.rstrip("/"), api_key=api_key))
+            supports_vision = _candidate_supports_vision(raw_candidate, default=profile == "vision")
+            candidates.append(
+                AIModelCandidate(
+                    profile=profile,
+                    model=model,
+                    base_url=base_url.rstrip("/"),
+                    api_key=api_key,
+                    supports_vision=supports_vision,
+                )
+            )
         return candidates
 
     def _default_base_url_for_profile(self, profile: AIRequestProfile) -> str:
@@ -218,6 +295,25 @@ def _clean_optional_string(value: Any) -> str | None:
         return str(value)
     normalized = value.strip()
     return normalized or None
+
+
+def _candidate_supports_vision(raw_candidate: dict[str, Any], *, default: bool) -> bool:
+    for key in ("supports_vision", "supports_images"):
+        if key in raw_candidate:
+            return _coerce_bool(raw_candidate[key], field_name=key)
+    return default
+
+
+def _coerce_bool(value: Any, *, field_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "y", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "n", "off"}:
+            return False
+    raise ValueError(f"AI model chain candidate {field_name} must be a boolean")
 
 
 @lru_cache(maxsize=1)

@@ -41,6 +41,15 @@ def session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         get_storage_service.cache_clear()
 
 
+def _ocr_diagnostic(text: str | None, reason: str = "ocr_text_extracted"):
+    return batch_pipeline.HeaderOCRDiagnostic(
+        text=text,
+        reason=reason if text else "no_api_key",
+        text_chars=len(text or ""),
+        cache_hit=False,
+    )
+
+
 def test_parse_student_identity_from_filename_supports_common_patterns() -> None:
     assert parse_student_identity_from_filename("20240001_Alice.pdf").student_name == "Alice"
     assert parse_student_identity_from_filename("Bob-20240002.pdf").student_id == "20240002"
@@ -101,6 +110,104 @@ def test_candidate_update_rejects_overlapping_ranges(session) -> None:
         )
 
 
+def test_candidate_update_allows_overlap_for_excluded_candidate(session) -> None:
+    exam = _create_exam(session)
+    source_pdf = settings.storage_dir / "combined.pdf"
+    _create_pdf(source_pdf, 4)
+    batch = _create_batch(session, exam.id, BatchUploadMode.combined_fixed.value, source_pdf, pages_per_submission=2)
+    prepared = prepare_batch_split(session, batch.id)
+
+    updated = update_batch_candidates(
+        session,
+        batch.id,
+        [
+            BatchCandidateUpdate(
+                id=prepared.candidates[0].id,
+                candidate_index=1,
+                start_page=1,
+                end_page=3,
+                student_name="Alice",
+                student_id="S001",
+                confirmed=True,
+            ),
+            BatchCandidateUpdate(
+                id=prepared.candidates[1].id,
+                candidate_index=2,
+                start_page=3,
+                end_page=4,
+                student_name="Duplicate",
+                student_id="S999",
+                confirmed=False,
+                excluded=True,
+            ),
+        ],
+    )
+
+    assert updated.candidates[1].excluded is True
+    assert updated.candidates[1].confirmed is False
+    assert updated.status == BatchStatus.split_ready.value
+
+
+def test_confirm_split_materializes_only_non_excluded_candidates(session) -> None:
+    exam = _create_exam(session)
+    source_pdf = settings.storage_dir / "combined.pdf"
+    _create_pdf(source_pdf, 4)
+    batch = _create_batch(session, exam.id, BatchUploadMode.combined_fixed.value, source_pdf, pages_per_submission=2)
+    prepared = prepare_batch_split(session, batch.id)
+    update_batch_candidates(
+        session,
+        batch.id,
+        [
+            BatchCandidateUpdate(
+                id=prepared.candidates[0].id,
+                candidate_index=1,
+                start_page=1,
+                end_page=4,
+                student_name="Alice",
+                student_id="S001",
+                confirmed=True,
+            ),
+            BatchCandidateUpdate(
+                id=prepared.candidates[1].id,
+                candidate_index=2,
+                start_page=3,
+                end_page=4,
+                excluded=True,
+            ),
+        ],
+    )
+
+    result = confirm_batch_split(session, batch.id)
+
+    assert result.created_submission_count == 1
+    assert len(result.batch.submissions) == 1
+    assert result.batch.submissions[0].student_name == "Alice"
+
+
+def test_confirm_split_rejects_all_excluded_candidates(session) -> None:
+    exam = _create_exam(session)
+    source_pdf = settings.storage_dir / "combined.pdf"
+    _create_pdf(source_pdf, 2)
+    batch = _create_batch(session, exam.id, BatchUploadMode.combined_fixed.value, source_pdf, pages_per_submission=2)
+    prepared = prepare_batch_split(session, batch.id)
+    update_batch_candidates(
+        session,
+        batch.id,
+        [
+            BatchCandidateUpdate(
+                id=prepared.candidates[0].id,
+                candidate_index=1,
+                start_page=1,
+                end_page=2,
+                excluded=True,
+            )
+        ],
+    )
+
+    with pytest.raises(BatchPipelineError, match="non-ignored"):
+        confirm_batch_split(session, batch.id)
+
+
 def test_confirm_fixed_split_materializes_submissions(session) -> None:
     exam = _create_exam(session)
     source_pdf = settings.storage_dir / "combined.pdf"
@@ -135,16 +242,16 @@ def test_auto_split_low_confidence_requires_review(session, monkeypatch: pytest.
     source_pdf = settings.storage_dir / "combined.pdf"
     _create_pdf(source_pdf, 2)
     batch = _create_batch(session, exam.id, BatchUploadMode.combined_auto.value, source_pdf)
-    responses = iter([
-        _fake_completion("Alice", "S001", 0.95),
-        _fake_completion("Bob", "S002", 0.4),
-    ])
     seen_route_keys: list[str | None] = []
 
     def fake_call_structured_json(**kwargs):
         seen_route_keys.append(kwargs.get("route_key"))
-        return next(responses)
+        page_no = kwargs["prompt_variables"]["page_no"]
+        if page_no == 1:
+            return _fake_completion("Alice", "S001", 0.95)
+        return _fake_completion("Bob", "S002", 0.4)
 
+    monkeypatch.setattr(batch_pipeline, "extract_header_text_diagnostic", lambda *_args, **_kwargs: _ocr_diagnostic(None))
     monkeypatch.setattr(batch_pipeline, "call_structured_json", fake_call_structured_json)
 
     prepared = prepare_batch_split(session, batch.id)
@@ -154,6 +261,222 @@ def test_auto_split_low_confidence_requires_review(session, monkeypatch: pytest.
     assert prepared.candidates[0].needs_review is False
     assert prepared.candidates[1].needs_review is True
     assert seen_route_keys == ["vision_split_header", "vision_split_header"]
+
+
+def test_auto_split_high_confidence_ocr_skips_vision(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    exam = _create_exam(session)
+    source_pdf = settings.storage_dir / "combined.pdf"
+    _create_pdf(source_pdf, 1)
+    batch = _create_batch(session, exam.id, BatchUploadMode.combined_auto.value, source_pdf)
+
+    def fake_call_structured_json(**_kwargs):
+        pytest.fail("vision fallback should not be called")
+
+    monkeypatch.setattr(batch_pipeline, "extract_header_text_diagnostic", lambda *_args, **_kwargs: _ocr_diagnostic("姓名 张三 学号 123456 页码 1"))
+    monkeypatch.setattr(batch_pipeline, "call_structured_json", fake_call_structured_json)
+
+    prepared = prepare_batch_split(session, batch.id)
+
+    assert len(prepared.candidates) == 1
+    assert prepared.candidates[0].student_name == "张三"
+    assert prepared.candidates[0].student_id == "123456"
+    assert prepared.candidates[0].needs_review is False
+    assert prepared.pages[0].raw_ai_response == "OCR_HEADER: 姓名 张三 学号 123456 页码 1"
+
+
+def test_auto_split_keeps_same_identity_pages_together_when_page_number_is_one(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    exam = _create_exam(session)
+    source_pdf = settings.storage_dir / "combined.pdf"
+    _create_pdf(source_pdf, 2)
+    batch = _create_batch(session, exam.id, BatchUploadMode.combined_auto.value, source_pdf)
+    ocr_texts = iter([
+        "姓名 张三 学号 123456 页码 1",
+        "姓名 张三 学号 123456 页码 1",
+    ])
+
+    def fake_call_structured_json(**_kwargs):
+        pytest.fail("high confidence OCR should skip vision fallback")
+
+    monkeypatch.setattr(batch_pipeline, "extract_header_text_diagnostic", lambda *_args, **_kwargs: _ocr_diagnostic(next(ocr_texts)))
+    monkeypatch.setattr(batch_pipeline, "call_structured_json", fake_call_structured_json)
+
+    prepared = prepare_batch_split(session, batch.id)
+
+    assert len(prepared.candidates) == 1
+    assert prepared.candidates[0].start_page == 1
+    assert prepared.candidates[0].end_page == 2
+    assert prepared.candidates[0].student_name == "张三"
+    assert prepared.candidates[0].student_id == "123456"
+
+
+def test_auto_split_ignores_unlabelled_noise_as_student_id(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    exam = _create_exam(session)
+    source_pdf = settings.storage_dir / "combined.pdf"
+    _create_pdf(source_pdf, 1)
+    batch = _create_batch(session, exam.id, BatchUploadMode.combined_auto.value, source_pdf)
+
+    def fake_call_structured_json(**_kwargs):
+        return _fake_completion("Alice", "S001", 0.95)
+
+    monkeypatch.setattr(batch_pipeline, "extract_header_text_diagnostic", lambda *_args, **_kwargs: _ocr_diagnostic("QuizOCR PAGEHEADER 2026-05-09 Page 1/1"))
+    monkeypatch.setattr(batch_pipeline, "call_structured_json", fake_call_structured_json)
+
+    prepared = prepare_batch_split(session, batch.id)
+
+    assert prepared.candidates[0].student_id == "S001"
+    assert prepared.pages[0].raw_ai_response != "OCR_HEADER: QuizOCR PAGEHEADER 2026-05-09 Page 1/1"
+
+
+
+def test_auto_split_page_failure_keeps_batch_reviewable(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    exam = _create_exam(session)
+    source_pdf = settings.storage_dir / "combined.pdf"
+    _create_pdf(source_pdf, 2)
+    batch = _create_batch(session, exam.id, BatchUploadMode.combined_auto.value, source_pdf)
+
+    def fake_call_structured_json(**kwargs):
+        if kwargs["prompt_variables"]["page_no"] == 2:
+            raise RuntimeError("provider failed")
+        return _fake_completion("Alice", "S001", 0.95)
+
+    monkeypatch.setattr(batch_pipeline, "extract_header_text_diagnostic", lambda *_args, **_kwargs: _ocr_diagnostic(None))
+    monkeypatch.setattr(batch_pipeline, "call_structured_json", fake_call_structured_json)
+
+    prepared = prepare_batch_split(session, batch.id)
+
+    assert prepared.status == BatchStatus.needs_split_review.value
+    assert len(prepared.pages) == 2
+    assert prepared.pages[1].error_message == "provider failed"
+    assert len(prepared.candidates) == 1
+    assert prepared.candidates[0].end_page == 2
+
+
+
+def test_auto_split_keeps_missing_identity_continuation_with_same_quiz_and_page_order(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    exam = _create_exam(session)
+    source_pdf = settings.storage_dir / "combined.pdf"
+    _create_pdf(source_pdf, 2)
+    batch = _create_batch(session, exam.id, BatchUploadMode.combined_auto.value, source_pdf)
+
+    def fake_call_structured_json(**kwargs):
+        page_no = kwargs["prompt_variables"]["page_no"]
+        if page_no == 1:
+            return _fake_completion("Alice", "S001", 0.95, page_number=1)
+        return _fake_completion(None, None, 0.8, page_number=2)
+
+    monkeypatch.setattr(batch_pipeline, "extract_header_text_diagnostic", lambda *_args, **_kwargs: _ocr_diagnostic(None))
+    monkeypatch.setattr(batch_pipeline, "call_structured_json", fake_call_structured_json)
+
+    prepared = prepare_batch_split(session, batch.id)
+
+    assert len(prepared.candidates) == 1
+    assert prepared.candidates[0].start_page == 1
+    assert prepared.candidates[0].end_page == 2
+
+
+
+def test_auto_split_starts_new_review_candidate_on_missing_identity_page_reset(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    exam = _create_exam(session)
+    source_pdf = settings.storage_dir / "combined.pdf"
+    _create_pdf(source_pdf, 3)
+    batch = _create_batch(session, exam.id, BatchUploadMode.combined_auto.value, source_pdf)
+
+    def fake_call_structured_json(**kwargs):
+        page_no = kwargs["prompt_variables"]["page_no"]
+        if page_no == 1:
+            return _fake_completion("Alice", "S001", 0.95, page_number=1)
+        if page_no == 2:
+            return _fake_completion("Alice", "S001", 0.95, page_number=2)
+        return _fake_completion(None, None, 0.85, page_number=1)
+
+    monkeypatch.setattr(batch_pipeline, "extract_header_text_diagnostic", lambda *_args, **_kwargs: _ocr_diagnostic(None))
+    monkeypatch.setattr(batch_pipeline, "call_structured_json", fake_call_structured_json)
+
+    prepared = prepare_batch_split(session, batch.id)
+
+    assert [(candidate.start_page, candidate.end_page) for candidate in prepared.candidates] == [(1, 2), (3, 3)]
+    assert prepared.candidates[1].needs_review is True
+
+
+
+def test_header_ocr_acceptance_reason_reports_regex_failures_and_low_confidence() -> None:
+    no_identity = batch_pipeline._header_extraction_from_ocr_text(1, "QuizOCR PAGEHEADER 2026-05-09 Page 1/1")
+    name_only = batch_pipeline._header_extraction_from_ocr_text(1, "姓名 Alice")
+    id_only = batch_pipeline._header_extraction_from_ocr_text(1, "学号 123456")
+    high_confidence = batch_pipeline._header_extraction_from_ocr_text(2, "姓名 张三 学号 123456 页码 2")
+
+    assert batch_pipeline._header_ocr_acceptance_reason(_ocr_diagnostic("noise"), no_identity) == "regex_no_identity"
+    assert batch_pipeline._header_ocr_acceptance_reason(_ocr_diagnostic("姓名 Alice"), name_only) == "regex_no_student_id"
+    assert batch_pipeline._header_ocr_acceptance_reason(_ocr_diagnostic("学号 123456"), id_only) == "regex_no_student_name"
+    assert batch_pipeline._header_ocr_acceptance_reason(_ocr_diagnostic("姓名 张三 学号 123456 页码 2"), high_confidence) == "ocr_low_confidence"
+
+
+def test_auto_split_low_confidence_ocr_falls_back_to_vision(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    exam = _create_exam(session)
+    source_pdf = settings.storage_dir / "combined.pdf"
+    _create_pdf(source_pdf, 1)
+    batch = _create_batch(session, exam.id, BatchUploadMode.combined_auto.value, source_pdf)
+    seen_prompt_variables: list[dict] = []
+
+    def fake_call_structured_json(**kwargs):
+        seen_prompt_variables.append(kwargs.get("prompt_variables"))
+        return _fake_completion("Alice", "S001", 0.95)
+
+    monkeypatch.setattr(batch_pipeline, "extract_header_text_diagnostic", lambda *_args, **_kwargs: _ocr_diagnostic("姓名 Alice"))
+    monkeypatch.setattr(batch_pipeline, "call_structured_json", fake_call_structured_json)
+
+    prepared = prepare_batch_split(session, batch.id)
+
+    assert prepared.candidates[0].student_name == "Alice"
+    assert prepared.candidates[0].student_id == "S001"
+    assert "OCR reference text" in seen_prompt_variables[0]["ocr_reference_text"]
+    assert "姓名 Alice" in seen_prompt_variables[0]["ocr_reference_text"]
+
+
+def test_auto_split_header_extraction_uses_configured_concurrency(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    seen_workers: list[int] = []
+
+    class InlineExecutor:
+        def __init__(self, max_workers: int) -> None:
+            seen_workers.append(max_workers)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def map(self, func, items):
+            return [func(item) for item in items]
+
+    def fake_extract_single_header(header_crop):
+        return batch_pipeline.HeaderExtractionResult(
+            page_no=header_crop.page_no,
+            page_image_path=header_crop.page_image_path,
+            crop_path=header_crop.crop_path,
+            extracted_text=header_crop.extracted_text,
+            header_data={"page_number": {"value": header_crop.page_no, "confidence": 1.0}},
+            raw_text="{}",
+            error_message=None,
+        )
+
+    monkeypatch.setattr(settings, "ocr_split_header_concurrency", 2)
+    monkeypatch.setattr(batch_pipeline, "ThreadPoolExecutor", InlineExecutor)
+    monkeypatch.setattr(batch_pipeline, "_extract_single_header_for_auto_split", fake_extract_single_header)
+    header_crops = [
+        batch_pipeline.RenderedHeaderCrop(
+            page_no=page_no,
+            page_image_path=tmp_path / f"page-{page_no}.png",
+            crop_path=tmp_path / f"crop-{page_no}.png",
+            extracted_text="",
+        )
+        for page_no in [3, 1, 2]
+    ]
+
+    results = batch_pipeline._extract_headers_for_auto_split(header_crops)
+
+    assert seen_workers == [2]
+    assert [result.page_no for result in results] == [1, 2, 3]
 
 
 def test_start_batch_grading_rejects_exam_without_gradable_questions(session, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -345,17 +668,17 @@ def _create_zip_with_pdfs(path: Path, filenames: list[str]) -> Path:
     return path
 
 
-def _fake_completion(student_name: str, student_id: str, confidence: float):
+def _fake_completion(student_name: str | None, student_id: str | None, confidence: float, page_number: int = 1):
     from types import SimpleNamespace
 
     from app.schemas.ai import PageHeaderExtraction, PageHeaderField
 
     data = PageHeaderExtraction(
-        student_name=PageHeaderField(value=student_name, confidence=confidence),
-        student_id=PageHeaderField(value=student_id, confidence=confidence),
+        student_name=PageHeaderField(value=student_name, confidence=confidence if student_name else 0.0),
+        student_id=PageHeaderField(value=student_id, confidence=confidence if student_id else 0.0),
         quiz_title=PageHeaderField(value="Quiz", confidence=confidence),
-        page_number=PageHeaderField(value=1, confidence=confidence),
-        is_first_page_confidence=confidence,
+        page_number=PageHeaderField(value=page_number, confidence=confidence),
+        is_first_page_confidence=confidence if page_number == 1 else 0.2,
         overall_confidence=confidence,
     )
     return SimpleNamespace(data=data, raw_text=data.model_dump_json())
