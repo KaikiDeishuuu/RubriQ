@@ -56,6 +56,8 @@ class BatchDetail(BaseSchema):
     split_version: int
     raw_split_extraction_response: dict[str, Any] | None = None
     error_message: str | None = None
+    ai_review_status: str = "not_started"
+    ai_review_error_message: str | None = None
     created_at: datetime
     updated_at: datetime
     pages: list[BatchPageRead] = Field(default_factory=list)

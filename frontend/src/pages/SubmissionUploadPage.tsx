@@ -578,7 +578,7 @@ function CandidateEditor({ candidates, drafts, onChange }: { candidates: BatchSp
             </div>
             {original?.error_message ? <InlineMessage message={original.error_message} tone="error" /> : null}
             {risky ? <div className="mb-3 text-xs font-semibold text-amber-800">该候选需要人工复核后才能确认。</div> : null}
-            <div className="grid gap-3 md:grid-cols-[0.5fr_0.5fr_1fr_1fr_1.2fr_0.5fr]">
+            <div className="grid gap-3 md:grid-cols-[minmax(6rem,0.7fr)_minmax(6rem,0.7fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(0,1.2fr)_auto]">
               <NumberInput label="起始页" value={draft.start_page} onChange={(value) => onChange(index, { start_page: value })} />
               <NumberInput label="结束页" value={draft.end_page} onChange={(value) => onChange(index, { end_page: value })} />
               <TextInput label="学生姓名" value={draft.student_name ?? ''} onChange={(value) => onChange(index, { student_name: value })} />
@@ -648,7 +648,7 @@ function NumberInput({ label, value, onChange }: { label: string; value: number;
   return (
     <label className="block space-y-2">
       <span className="text-xs font-semibold text-ink-700">{label}</span>
-      <input type="number" min="1" value={value} onChange={(event) => onChange(Math.max(1, Number(event.target.value) || 1))} className="w-full rounded-2xl border border-ink-900/10 bg-white px-3 py-2 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100" />
+      <input type="number" min="1" value={value} onChange={(event) => onChange(Math.max(1, Number(event.target.value) || 1))} className="w-full min-w-[6rem] rounded-2xl border border-ink-900/10 bg-white px-3 py-2 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100" />
     </label>
   )
 }

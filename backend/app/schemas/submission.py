@@ -72,6 +72,19 @@ class AnswerDetail(BaseSchema):
     teacher_override_score: Decimal | None = None
     teacher_comment: str | None = None
     raw_ai_response: str | None = None
+    fast_score: Decimal | None = None
+    fast_confidence: ConfidenceLevel | None = None
+    fast_ai_comment: str | None = None
+    fast_missing_points: list[str] | None = None
+    fast_raw_ai_response: str | None = None
+    review_score: Decimal | None = None
+    review_confidence: ConfidenceLevel | None = None
+    review_ai_comment: str | None = None
+    review_missing_points: list[str] | None = None
+    review_raw_ai_response: str | None = None
+    review_triggers: list[str] = Field(default_factory=list)
+    review_decision: str = "not_required"
+    review_model: str | None = None
     question: QuestionRead
     rubric_results: list[AnswerRubricResultRead] = Field(default_factory=list)
     created_at: datetime
@@ -88,6 +101,7 @@ class SubmissionDetail(SubmissionSummary):
 class SubmissionOverride(BaseSchema):
     teacher_override_score: float | None = None
     teacher_comment: str | None = None
+    reviewed: bool | None = None
 
 
 class SubmissionUploadResponse(BaseSchema):

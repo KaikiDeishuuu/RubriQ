@@ -123,6 +123,8 @@ class ExamResultRow(BaseSchema):
     status: str
     total_score: float
     needs_human_review: bool = False
+    ai_reviewed_answer_count: int = 0
+    pending_review_answer_count: int = 0
     source_mode: str | None = None
     split_confidence: float | None = None
     split_confirmed: bool = False
@@ -135,3 +137,5 @@ class ExamResultsResponse(BaseSchema):
     exam: ExamDetail
     questions: list[QuestionRead] = Field(default_factory=list)
     rows: list[ExamResultRow] = Field(default_factory=list)
+    ai_review_active: bool = False
+    ai_review_statuses: list[str] = Field(default_factory=list)

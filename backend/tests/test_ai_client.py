@@ -2,7 +2,7 @@ import pytest
 import httpx
 
 from app.services import ai_client
-from app.services.ai_client import AIClientError, OpenAICompatibleClient
+from app.services.ai_client import AIClientError, OpenAICompatibleClient, get_ai_client_for
 
 
 def test_chat_completion_retries_transient_status(monkeypatch) -> None:
@@ -52,6 +52,21 @@ def test_chat_completion_does_not_retry_validation_status(monkeypatch) -> None:
 
     assert calls == 1
     client.close()
+
+
+def test_get_ai_client_for_caches_by_endpoint_and_key() -> None:
+    get_ai_client_for.cache_clear()
+
+    first = get_ai_client_for("https://ai.test/v1", "key-1")
+    second = get_ai_client_for("https://ai.test/v1", "key-1")
+    third = get_ai_client_for("https://ai.test/v1", "key-2")
+
+    assert first is second
+    assert first is not third
+    first.close()
+    third.close()
+    get_ai_client_for.cache_clear()
+
 
 
 def test_chat_completion_reports_non_json_gateway_response() -> None:

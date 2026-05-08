@@ -63,6 +63,8 @@ class SubmissionBatch(Base, TimestampMixin):
     split_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     raw_split_extraction_response: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ai_review_status: Mapped[str] = mapped_column(String(50), nullable=False, default="not_started")
+    ai_review_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     exam: Mapped[Exam] = relationship(back_populates="batches")
     pages: Mapped[list["BatchPage"]] = relationship(
@@ -242,6 +244,19 @@ class Answer(Base, TimestampMixin):
     teacher_override_score: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     teacher_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_ai_response: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fast_score: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    fast_confidence: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    fast_ai_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fast_missing_points: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    fast_raw_ai_response: Mapped[str | None] = mapped_column(Text, nullable=True)
+    review_score: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
+    review_confidence: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    review_ai_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    review_missing_points: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    review_raw_ai_response: Mapped[str | None] = mapped_column(Text, nullable=True)
+    review_triggers: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    review_decision: Mapped[str] = mapped_column(String(50), nullable=False, default="not_required")
+    review_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     submission: Mapped[Submission] = relationship(back_populates="answers")
     question: Mapped[Question] = relationship()

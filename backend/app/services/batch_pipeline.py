@@ -6,15 +6,18 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update as sa_update
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import settings
 from app.models import (
+    Answer,
     BatchPage,
     BatchSplitCandidate,
     BatchStatus,
     BatchUploadMode,
+    Exam,
+    Question,
     Submission,
     SubmissionBatch,
     SubmissionStatus,
@@ -22,11 +25,26 @@ from app.models import (
 from app.schemas.ai import PageHeaderExtraction
 from app.schemas.batch import BatchCandidateUpdate
 from app.services.llm import call_structured_json
+from app.services.pipeline import _to_decimal, review_answer_with_strong_model
 from app.services.pdf import crop_top_region, get_pdf_page_count, hash_file, render_pdf_to_images, split_pdf_pages
 from app.storage.local import get_storage_service
 from app.utils.files import PDF_SIGNATURE, sanitize_filename
 
 SPLIT_CONFIDENCE_THRESHOLD = 0.75
+ACTIVE_SUBMISSION_STATUSES = {
+    SubmissionStatus.processing.value,
+    SubmissionStatus.rendering.value,
+    SubmissionStatus.extracting.value,
+    SubmissionStatus.grading.value,
+}
+STARTABLE_SUBMISSION_STATUSES = {
+    SubmissionStatus.uploaded.value,
+    SubmissionStatus.failed.value,
+}
+COMPLETED_SUBMISSION_STATUSES = {
+    SubmissionStatus.graded.value,
+    SubmissionStatus.needs_review.value,
+}
 
 
 class BatchPipelineError(RuntimeError):
@@ -213,20 +231,143 @@ def start_batch_grading(session: Session, batch_id: int) -> tuple[SubmissionBatc
     batch = load_batch_detail(session, batch_id)
     if batch.status not in {BatchStatus.ready_for_grading.value, BatchStatus.completed_with_errors.value}:
         raise BatchPipelineError("Batch split must be confirmed before grading")
-    queued_count = 0
+    _ensure_exam_has_gradable_questions(session, batch.exam_id)
+    queued_submission_ids: list[int] = []
     for submission in batch.submissions:
         if not submission.split_confirmed:
             continue
-        if submission.status in {SubmissionStatus.processing.value, SubmissionStatus.rendering.value, SubmissionStatus.extracting.value, SubmissionStatus.grading.value}:
+        if submission.status not in STARTABLE_SUBMISSION_STATUSES:
             continue
-        submission.status = SubmissionStatus.processing.value
-        submission.error_message = None
-        session.flush()
-        process_submission_task.delay(submission.id)
-        queued_count += 1
+        claimed = session.execute(
+            sa_update(Submission)
+            .where(Submission.id == submission.id, Submission.status.in_(STARTABLE_SUBMISSION_STATUSES))
+            .values(status=SubmissionStatus.processing.value, error_message=None)
+        ).rowcount
+        if claimed:
+            queued_submission_ids.append(submission.id)
+    if queued_submission_ids:
+        batch.status = BatchStatus.grading.value
+        session.commit()
+        for submission_id in queued_submission_ids:
+            process_submission_task.delay(submission_id)
+    else:
+        refresh_batch_grading_status(session, batch.id)
+    return load_batch_detail(session, batch.id), len(queued_submission_ids)
+
+
+def _ensure_exam_has_gradable_questions(session: Session, exam_id: int) -> None:
+    exam = session.get(Exam, exam_id)
+    if exam is None:
+        raise BatchPipelineError(f"Exam {exam_id} not found")
+    question_count = session.execute(select(func.count(Question.id)).where(Question.exam_id == exam_id)).scalar_one()
+    if question_count == 0:
+        raise BatchPipelineError("No gradable questions were found. Please parse the rubric before starting grading.")
+
+
+
+def refresh_batch_grading_status(session: Session, batch_id: int) -> SubmissionBatch:
+    batch = load_batch_detail(session, batch_id)
+    submissions = [submission for submission in batch.submissions if submission.split_confirmed]
+    if not submissions:
+        return batch
+    if any(submission.status in ACTIVE_SUBMISSION_STATUSES for submission in submissions):
+        next_status = BatchStatus.grading.value
+    elif any(submission.status == SubmissionStatus.failed.value for submission in submissions):
+        next_status = BatchStatus.completed_with_errors.value
+    elif all(submission.status in COMPLETED_SUBMISSION_STATUSES for submission in submissions):
+        if _queue_batch_review_if_needed(session, batch):
+            next_status = BatchStatus.grading.value
+        elif batch.ai_review_status == "failed":
+            next_status = BatchStatus.completed_with_errors.value
+        elif batch.ai_review_status == "queued" or batch.ai_review_status == "running":
+            next_status = BatchStatus.grading.value
+        else:
+            next_status = BatchStatus.completed.value
+    else:
+        next_status = batch.status
+    if batch.status != next_status:
+        batch.status = next_status
+        session.commit()
+    return load_batch_detail(session, batch.id)
+
+
+def review_batch_grading(session: Session, batch_id: int) -> SubmissionBatch:
+    batch = load_batch_detail(session, batch_id)
+    if batch.ai_review_status == "completed" or not settings.ai_grading_review_enabled:
+        return batch
+    batch.ai_review_status = "running"
+    batch.ai_review_error_message = None
     batch.status = BatchStatus.grading.value
     session.commit()
-    return load_batch_detail(session, batch.id), queued_count
+    try:
+        answer_ids = _batch_variance_review_answer_ids(session, batch.id)
+        for answer_id in answer_ids:
+            review_answer_with_strong_model(session, answer_id, trigger="score_variance")
+        batch = load_batch_detail(session, batch.id)
+        batch.ai_review_status = "completed"
+        batch.ai_review_error_message = None
+        batch.status = _terminal_batch_status(batch)
+        session.commit()
+    except Exception as exc:
+        batch = load_batch_detail(session, batch_id)
+        batch.ai_review_status = "failed"
+        batch.ai_review_error_message = str(exc)
+        batch.status = BatchStatus.completed_with_errors.value
+        session.commit()
+        raise
+    return load_batch_detail(session, batch_id)
+
+
+def _queue_batch_review_if_needed(session: Session, batch: SubmissionBatch) -> bool:
+    if not settings.ai_grading_review_enabled or batch.ai_review_status in {"queued", "running", "completed", "failed"}:
+        return False
+    if not _batch_variance_review_answer_ids(session, batch.id):
+        batch.ai_review_status = "completed"
+        session.commit()
+        return False
+    from app.workers.tasks import review_batch_grading_task
+
+    claimed = session.execute(
+        sa_update(SubmissionBatch)
+        .where(SubmissionBatch.id == batch.id, SubmissionBatch.ai_review_status == "not_started")
+        .values(ai_review_status="queued", ai_review_error_message=None)
+    ).rowcount
+    session.commit()
+    if claimed:
+        review_batch_grading_task.delay(batch.id)
+    return bool(claimed)
+
+
+def _batch_variance_review_answer_ids(session: Session, batch_id: int) -> list[int]:
+    stmt = (
+        select(Answer)
+        .join(Submission, Answer.submission_id == Submission.id)
+        .where(Submission.batch_id == batch_id, Submission.split_confirmed.is_(True))
+    )
+    answers = list(session.execute(stmt).scalars().all())
+    by_question: dict[int, list[Answer]] = {}
+    for answer in answers:
+        by_question.setdefault(answer.question_id, []).append(answer)
+    review_answer_ids: list[int] = []
+    for question_answers in by_question.values():
+        if len(question_answers) < settings.ai_grading_review_variance_min_answers:
+            continue
+        max_score = max((answer.max_score for answer in question_answers), default=0)
+        if max_score <= 0:
+            continue
+        scores = [answer.fast_score if answer.fast_score is not None else answer.score for answer in question_answers]
+        score_range = max(scores) - min(scores)
+        if score_range <= _to_decimal(float(max_score) * settings.ai_grading_review_variance_range_ratio):
+            continue
+        review_answer_ids.extend(answer.id for answer in question_answers if answer.review_score is None)
+    return review_answer_ids
+
+
+def _terminal_batch_status(batch: SubmissionBatch) -> str:
+    submissions = [submission for submission in batch.submissions if submission.split_confirmed]
+    if any(submission.status == SubmissionStatus.failed.value for submission in submissions):
+        return BatchStatus.completed_with_errors.value
+    return BatchStatus.completed.value
 
 
 def _prepare_zip_batch(session: Session, batch: SubmissionBatch) -> None:
@@ -356,6 +497,7 @@ def _prepare_auto_split_batch(session: Session, batch: SubmissionBatch) -> None:
                 prompt_variables={"page_no": rendered_page.page_no},
                 image_paths=[crop_path],
                 request_profile="vision",
+                route_key="vision_split_header",
             )
             header_data = completion.data.model_dump(mode="json")
             raw_text = completion.raw_text

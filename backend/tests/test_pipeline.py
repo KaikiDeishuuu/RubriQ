@@ -1,15 +1,23 @@
 from decimal import Decimal
+from pathlib import Path
 
-from app.models import ConfidenceLevel
-from app.schemas.ai import ExtractedQuestion, RubricParseResult
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from app.db.base import Base
+from app.models import Answer, ConfidenceLevel, Exam, Question, Submission, SubmissionStatus
+from app.schemas.ai import ExtractedQuestion, RubricParseResult, StudentExtractionResult
+from app.services import pipeline
 from app.services.pipeline import (
     QuestionSnapshot,
     RubricItemSnapshot,
     _build_empty_answer_fallback,
     _build_error_fallback,
     _build_grading_input,
+    _recalculate_submission_total,
     _scored_questions_only,
     _strictness_instructions,
+    process_submission,
 )
 
 
@@ -93,6 +101,152 @@ def test_error_fallback_preserves_error_response_and_review_flag() -> None:
         "AI 评分失败：provider failed",
         "AI 评分失败：provider failed",
     ]
+
+
+def test_extract_submission_answers_uses_student_extraction_route(monkeypatch) -> None:
+    seen_route_keys: list[str | None] = []
+
+    def fake_call_structured_json(**kwargs):
+        seen_route_keys.append(kwargs.get("route_key"))
+        return type(
+            "Completion",
+            (),
+            {
+                "data": StudentExtractionResult(student_name="Alice", student_id="S001", answers=[]),
+                "raw_text": "{}",
+            },
+        )()
+
+    monkeypatch.setattr(pipeline, "call_structured_json", fake_call_structured_json)
+
+    result, raw_text = pipeline._extract_submission_answers(
+        exam_title="Sample",
+        questions_json="[]",
+        image_paths=[],
+    )
+
+    assert result.student_name == "Alice"
+    assert raw_text == "{}"
+    assert seen_route_keys == ["vision_student_extraction"]
+
+
+
+def test_grade_question_uses_grading_route(monkeypatch) -> None:
+    question = _question_snapshot()
+    seen_route_keys: list[str | None] = []
+
+    def fake_call_structured_json(**kwargs):
+        seen_route_keys.append(kwargs.get("route_key"))
+        return type(
+            "Completion",
+            (),
+            {
+                "data": type(
+                    "GradingPayload",
+                    (),
+                    {
+                        "rubric_evaluation": [],
+                        "confidence": ConfidenceLevel.high,
+                        "needs_human_review": False,
+                        "missing_points": [],
+                        "final_comment": "",
+                    },
+                )(),
+                "raw_text": "{}",
+                "model": "chosen-grader",
+            },
+        )()
+
+    monkeypatch.setattr(pipeline, "call_structured_json", fake_call_structured_json)
+
+    answer, _rubric_results, _needs_review = pipeline._grade_question(
+        submission_id=7,
+        question=question,
+        answer_text="student answer",
+        source_page=1,
+        extraction_confidence=ConfidenceLevel.high,
+    )
+
+    assert answer.raw_ai_response == "{}"
+    assert seen_route_keys == ["grading"]
+
+
+
+def test_process_submission_without_questions_marks_needs_review(monkeypatch) -> None:
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+    session = SessionLocal()
+    try:
+        exam = Exam(title="Sample")
+        session.add(exam)
+        session.flush()
+        submission = Submission(
+            exam_id=exam.id,
+            original_pdf_path="submissions/sample.pdf",
+            status=SubmissionStatus.processing.value,
+        )
+        session.add(submission)
+        session.commit()
+        monkeypatch.setattr(Path, "exists", lambda _path: True)
+        monkeypatch.setattr(pipeline.get_storage_service(), "path_for", lambda _path: Path("sample.pdf"))
+        monkeypatch.setattr(pipeline, "render_pdf_to_images", lambda *_args, **_kwargs: [])
+        monkeypatch.setattr(
+            pipeline,
+            "_extract_submission_answers",
+            lambda **_kwargs: (StudentExtractionResult(student_name="Alice", student_id="S001", answers=[]), "{}"),
+        )
+
+        updated_submission = process_submission(session, submission.id)
+
+        assert updated_submission.status == SubmissionStatus.needs_review.value
+        assert updated_submission.total_score == Decimal("0.00")
+        assert updated_submission.error_message == "No gradable questions were found for this submission"
+    finally:
+        session.close()
+
+
+
+def test_recalculate_submission_total_uses_explicit_review_flags_only() -> None:
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+    session = SessionLocal()
+    try:
+        exam = Exam(title="Sample")
+        session.add(exam)
+        session.flush()
+        question = Question(exam_id=exam.id, question_no="1", title="Question 1", max_score=Decimal("5"))
+        session.add(question)
+        session.flush()
+        submission = Submission(
+            exam_id=exam.id,
+            original_pdf_path="submissions/sample.pdf",
+            status=SubmissionStatus.needs_review.value,
+        )
+        session.add(submission)
+        session.flush()
+        session.add(
+            Answer(
+                submission_id=submission.id,
+                question_id=question.id,
+                extracted_answer="answer",
+                score=Decimal("3"),
+                max_score=Decimal("5"),
+                confidence=ConfidenceLevel.low.value,
+                needs_human_review=False,
+            )
+        )
+        session.commit()
+
+        _recalculate_submission_total(session, submission.id)
+
+        session.refresh(submission)
+        assert submission.total_score == Decimal("3.00")
+        assert submission.status == SubmissionStatus.graded.value
+    finally:
+        session.close()
+
 
 
 def _question_snapshot() -> QuestionSnapshot:

@@ -38,8 +38,24 @@ docker compose up --build
 
 - `AI_BASE_URL`
 - `AI_API_KEY`
+- `AI_VISION_BASE_URL`, `AI_VISION_API_KEY`
+- `AI_GRADING_BASE_URL`, `AI_GRADING_API_KEY`
 - `AI_VISION_MODEL`
 - `AI_GRADING_MODEL`
+- `AI_VISION_CHAIN`
+- `AI_VISION_RUBRIC_CHAIN`
+- `AI_VISION_STUDENT_EXTRACTION_CHAIN`
+- `AI_VISION_SPLIT_HEADER_CHAIN`
+- `AI_GRADING_CHAIN`
+- `AI_GRADING_REVIEW_ENABLED`
+- `AI_GRADING_REVIEW_MODEL`
+- `AI_GRADING_REVIEW_CHAIN`
+- `AI_GRADING_REVIEW_SCORE_DELTA_RATIO`
+- `AI_GRADING_REVIEW_VARIANCE_MIN_ANSWERS`
+- `AI_GRADING_REVIEW_VARIANCE_RANGE_RATIO`
+- `AI_GRADING_CONCURRENCY`
+- `AI_GRADING_GLOBAL_CONCURRENCY`
+- `AI_GRADING_STRICTNESS`
 - `AI_REQUEST_TIMEOUT_SECONDS`
 - `AI_MAX_RETRIES`
 - `AI_RETRY_BACKOFF_SECONDS`
@@ -52,6 +68,10 @@ docker compose up --build
 - `RENDER_DPI`
 - `CORS_ORIGINS`
 - `VITE_API_BASE_URL`
+
+`AI_VISION_*` is used for rubric parsing, student answer OCR, and batch split header detection; `AI_GRADING_*` is used for scoring. Chain variables are JSON arrays of ordered candidates, for example `[{"model":"gemini-2.5-pro","base_url":"https://generativelanguage.googleapis.com/v1beta/openai","api_key":"..."},{"model":"gpt-4o"}]`. Task-specific chains override `AI_VISION_CHAIN`; if no chain is configured, the legacy single-model variables are used. Model-chain fallback happens before the existing business fallback that marks answers for human review.
+
+`AI_GRADING_CHAIN` is technical fallback for the fast grading pass: later candidates are used only if earlier candidates fail. `AI_GRADING_REVIEW_*` controls the optional quality review pass: when enabled, low-confidence, model-flagged, weak-evidence, high score delta, or high batch-variance answers can be regraded with a stronger model before teacher review.
 
 ## API highlights
 

@@ -90,20 +90,19 @@ def get_ai_client() -> OpenAICompatibleClient:
     return OpenAICompatibleClient()
 
 
+@lru_cache(maxsize=32)
+def get_ai_client_for(base_url: str, api_key: str) -> OpenAICompatibleClient:
+    return OpenAICompatibleClient(base_url=base_url, api_key=api_key)
+
+
 @lru_cache(maxsize=1)
 def get_vision_client() -> OpenAICompatibleClient:
-    return OpenAICompatibleClient(
-        base_url=settings.effective_vision_base_url,
-        api_key=settings.effective_vision_api_key,
-    )
+    return get_ai_client_for(settings.effective_vision_base_url, settings.effective_vision_api_key)
 
 
 @lru_cache(maxsize=1)
 def get_grading_client() -> OpenAICompatibleClient:
-    return OpenAICompatibleClient(
-        base_url=settings.effective_grading_base_url,
-        api_key=settings.effective_grading_api_key,
-    )
+    return get_ai_client_for(settings.effective_grading_base_url, settings.effective_grading_api_key)
 
 
 def _extract_message_content(response_json: dict[str, Any]) -> str:

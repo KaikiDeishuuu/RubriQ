@@ -10,10 +10,10 @@ from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update as sa_update
 from sqlalchemy.orm import Session, selectinload
 
-from app.core.config import settings
+from app.core.config import AIRouteKey, settings
 from app.models import (
     Answer,
     AnswerRubricResult,
@@ -53,6 +53,20 @@ class QuestionSnapshot:
     title: str
     max_score: Decimal
     rubric_items: list[RubricItemSnapshot]
+
+
+@dataclass(slots=True)
+class GradingAttempt:
+    score: Decimal
+    confidence: ConfidenceLevel
+    ai_comment: str
+    missing_points: list[str]
+    raw_response: str
+    rubric_results: list[AnswerRubricResult]
+    needs_human_review: bool
+    model: str
+    model_requested_review: bool
+    missing_rubric_evidence: bool
 
 
 _CONFIDENCE_RANK = {
@@ -199,6 +213,7 @@ def parse_rubric_for_exam(session: Session, exam_id: int, exam_file_id: int | No
             prompt_variables=prompt_variables,
             image_paths=[page.image_path for page in rendered_pages],
             request_profile="vision",
+            route_key="vision_rubric",
         )
     except Exception as exc:  # noqa: BLE001 - rubric parsing should surface a user-visible failure
         exam_file.error_message = str(exc)
@@ -249,11 +264,12 @@ def process_submission(session: Session, submission_id: int) -> Submission:
     if not pdf_path.exists():
         raise PipelineError("Submission PDF no longer exists")
 
-    submission.status = SubmissionStatus.processing.value
-    session.commit()
+    if submission.status != SubmissionStatus.rendering.value:
+        submission.status = SubmissionStatus.processing.value
+        session.commit()
 
-    submission.status = SubmissionStatus.rendering.value
-    session.commit()
+        submission.status = SubmissionStatus.rendering.value
+        session.commit()
 
     rendered_pages = render_pdf_to_images(
         pdf_path,
@@ -322,6 +338,13 @@ def process_submission(session: Session, submission_id: int) -> Submission:
             )
         )
 
+    if not grading_tasks:
+        submission.total_score = Decimal("0")
+        submission.status = SubmissionStatus.needs_review.value
+        submission.error_message = "No gradable questions were found for this submission"
+        session.commit()
+        return _load_submission(session, submission.id)
+
     max_workers = min(len(grading_tasks), settings.ai_grading_concurrency)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
@@ -359,16 +382,25 @@ def process_submission(session: Session, submission_id: int) -> Submission:
 def apply_teacher_override(
     session: Session,
     answer_id: int,
-    teacher_override_score: float | None,
-    teacher_comment: str | None,
+    teacher_override_score: float | None = None,
+    teacher_comment: str | None = None,
+    reviewed: bool | None = None,
+    update_teacher_override_score: bool = True,
+    update_teacher_comment: bool = True,
 ) -> Answer:
     answer = session.get(Answer, answer_id)
     if answer is None:
         raise PipelineError(f"Answer {answer_id} not found")
-    answer.teacher_override_score = (
-        _to_decimal(teacher_override_score) if teacher_override_score is not None else None
-    )
-    answer.teacher_comment = teacher_comment
+    if update_teacher_override_score:
+        answer.teacher_override_score = (
+            _to_decimal(teacher_override_score) if teacher_override_score is not None else None
+        )
+    if update_teacher_comment:
+        answer.teacher_comment = teacher_comment
+    if reviewed is True:
+        answer.needs_human_review = False
+    elif reviewed is False:
+        answer.needs_human_review = True
     session.flush()
     _recalculate_submission_total(session, answer.submission_id)
     session.commit()
@@ -388,10 +420,8 @@ def _grade_question(
     source_page: int | None,
     extraction_confidence: ConfidenceLevel,
 ) -> tuple[Answer, list[AnswerRubricResult], bool]:
-    started_at = time.perf_counter()
-    used_fallback = False
     if not answer_text.strip():
-        used_fallback = True
+        started_at = time.perf_counter()
         answer, rubric_results, needs_review = _build_empty_answer_fallback(
             submission_id=submission_id,
             question=question,
@@ -404,56 +434,138 @@ def _grade_question(
             question.question_no,
             settings.ai_grading_model,
             time.perf_counter() - started_at,
-            used_fallback,
+            True,
         )
         return answer, rubric_results, needs_review
 
-    grading_input = _build_grading_input(question, answer_text)
-
-    try:
-        strictness = settings.ai_grading_strictness
-        strictness_instructions = _strictness_instructions(strictness)
-        completion = call_structured_json(
-            model=settings.ai_grading_model,
-            system_prompt_name="grading.system.md",
-            user_prompt_name="grading.user.md",
-            response_model=GradingResult,
-            prompt_variables={
-                "grading_input_json": json.dumps(grading_input, ensure_ascii=False, indent=2),
-                "strictness": strictness,
-                "strictness_instructions": strictness_instructions,
-            },
-            request_profile="grading",
-        )
-        grading_result = completion.data
-        raw_response = completion.raw_text
-    except Exception as exc:  # noqa: BLE001 - we want a safe fallback for grading
-        used_fallback = True
-        logger.exception("Question grading failed for question %s: %s", question.id, exc)
-        grading_result = None
-        raw_response = f"ERROR: {exc}"
-    finally:
-        logger.info(
-            "Question grading completed submission_id=%s question_id=%s question_no=%s model=%s duration_seconds=%.2f fallback=%s",
-            submission_id,
-            question.id,
-            question.question_no,
-            settings.ai_grading_model,
-            time.perf_counter() - started_at,
-            used_fallback,
-        )
-
-    if grading_result is None:
+    fast_attempt = _call_grading_model(
+        question=question,
+        answer_text=answer_text,
+        extraction_confidence=extraction_confidence,
+        route_key="grading",
+    )
+    if fast_attempt is None:
         return _build_error_fallback(
             submission_id=submission_id,
             question=question,
             answer_text=answer_text,
             source_page=source_page,
             extraction_confidence=extraction_confidence,
-            raw_response=raw_response,
+            raw_response="ERROR: Fast grading failed",
         )
 
-    rubric_results = []
+    review_triggers = _review_triggers_for_attempt(fast_attempt)
+    review_attempt: GradingAttempt | None = None
+    review_decision = "not_required"
+    final_attempt = fast_attempt
+
+    if settings.ai_grading_review_enabled and review_triggers:
+        review_attempt = _call_grading_model(
+            question=question,
+            answer_text=answer_text,
+            extraction_confidence=extraction_confidence,
+            route_key="grading_review",
+        )
+        if review_attempt is None:
+            review_decision = "failed"
+        else:
+            final_attempt = review_attempt
+            review_decision = "accepted_review"
+            if _score_delta_exceeds_threshold(fast_attempt.score, review_attempt.score, question.max_score):
+                review_triggers.append("score_delta")
+    elif review_triggers:
+        review_decision = "needs_teacher_review"
+
+    needs_review = bool(
+        final_attempt.needs_human_review
+        or "score_delta" in review_triggers
+        or review_decision in {"failed", "needs_teacher_review"}
+    )
+    answer = _build_answer_from_attempt(
+        submission_id=submission_id,
+        question=question,
+        answer_text=answer_text,
+        source_page=source_page,
+        attempt=final_attempt,
+        needs_review=needs_review,
+    )
+    answer.fast_score = fast_attempt.score
+    answer.fast_confidence = fast_attempt.confidence.value
+    answer.fast_ai_comment = fast_attempt.ai_comment
+    answer.fast_missing_points = fast_attempt.missing_points
+    answer.fast_raw_ai_response = fast_attempt.raw_response
+    answer.review_triggers = _dedupe_strings(review_triggers)
+    answer.review_decision = review_decision
+    if review_attempt is not None:
+        answer.review_score = review_attempt.score
+        answer.review_confidence = review_attempt.confidence.value
+        answer.review_ai_comment = review_attempt.ai_comment
+        answer.review_missing_points = review_attempt.missing_points
+        answer.review_raw_ai_response = review_attempt.raw_response
+        answer.review_model = review_attempt.model
+    elif review_decision == "failed":
+        answer.needs_human_review = True
+
+    return answer, final_attempt.rubric_results, answer.needs_human_review
+
+
+def _call_grading_model(
+    *,
+    question: QuestionSnapshot,
+    answer_text: str,
+    extraction_confidence: ConfidenceLevel,
+    route_key: AIRouteKey,
+) -> GradingAttempt | None:
+    started_at = time.perf_counter()
+    grading_model = settings.effective_grading_model_for_route(route_key)
+    try:
+        strictness = settings.ai_grading_strictness
+        strictness_instructions = _strictness_instructions(strictness)
+        completion = call_structured_json(
+            model=grading_model,
+            system_prompt_name="grading.system.md",
+            user_prompt_name="grading.user.md",
+            response_model=GradingResult,
+            prompt_variables={
+                "grading_input_json": json.dumps(_build_grading_input(question, answer_text), ensure_ascii=False, indent=2),
+                "strictness": strictness,
+                "strictness_instructions": strictness_instructions,
+            },
+            request_profile="grading",
+            route_key=route_key,
+        )
+        return _build_grading_attempt(
+            question=question,
+            answer_text=answer_text,
+            extraction_confidence=extraction_confidence,
+            grading_result=completion.data,
+            raw_response=completion.raw_text,
+            model=completion.model,
+        )
+    except Exception as exc:  # noqa: BLE001 - grading can fall back to manual review
+        logger.exception("Question grading failed for question %s route=%s: %s", question.id, route_key, exc)
+        return None
+    finally:
+        logger.info(
+            "Question grading completed question_id=%s question_no=%s route=%s model=%s duration_seconds=%.2f",
+            question.id,
+            question.question_no,
+            route_key,
+            grading_model,
+            time.perf_counter() - started_at,
+        )
+
+
+def _build_grading_attempt(
+    *,
+    question: QuestionSnapshot,
+    answer_text: str,
+    extraction_confidence: ConfidenceLevel,
+    grading_result: GradingResult,
+    raw_response: str,
+    model: str,
+) -> GradingAttempt:
+    rubric_results: list[AnswerRubricResult] = []
     rubric_lookup = {rubric_item.id: rubric_item for rubric_item in question.rubric_items}
     awarded_total = Decimal("0")
     missing_points = list(grading_result.missing_points)
@@ -464,13 +576,7 @@ def _grade_question(
         rubric_item = rubric_lookup.get(rubric_item_id)
         if rubric_item is None:
             continue
-        awarded_score = _to_decimal(
-            clamp_score(
-                float(evaluation.awarded_score),
-                0.0,
-                float(rubric_item.max_score),
-            )
-        )
+        awarded_score = _to_decimal(clamp_score(float(evaluation.awarded_score), 0.0, float(rubric_item.max_score)))
         awarded_total += awarded_score
         rubric_item_ids_seen.add(rubric_item.id)
         rubric_results.append(
@@ -482,9 +588,11 @@ def _grade_question(
             )
         )
 
+    missing_rubric_evidence = False
     for rubric_item in question.rubric_items:
         if rubric_item.id in rubric_item_ids_seen:
             continue
+        missing_rubric_evidence = True
         rubric_results.append(
             AnswerRubricResult(
                 rubric_item_id=rubric_item.id,
@@ -496,9 +604,7 @@ def _grade_question(
         if rubric_item.description not in missing_points:
             missing_points.append(rubric_item.description)
 
-    final_score = _to_decimal(
-        clamp_score(float(awarded_total), 0.0, float(question.max_score))
-    )
+    final_score = _to_decimal(clamp_score(float(awarded_total), 0.0, float(question.max_score)))
     if answer_text.strip():
         min_score_ratio = 0.15 if settings.ai_grading_strictness == "lenient" else 0.05
         min_score = _to_decimal(float(question.max_score) * min_score_ratio)
@@ -506,30 +612,65 @@ def _grade_question(
             min_score = Decimal("0.5")
         final_score = max(final_score, min_score)
     final_confidence = _combine_confidence(extraction_confidence, grading_result.confidence)
-    needs_review = bool(
-        grading_result.needs_human_review
-        or final_confidence == ConfidenceLevel.low
-        or not answer_text.strip()
-    )
+    needs_review = bool(grading_result.needs_human_review or final_confidence == ConfidenceLevel.low)
     if needs_review and grading_result.final_comment.strip() and grading_result.final_comment.strip() not in missing_points:
         missing_points.append(grading_result.final_comment.strip())
 
-    answer = Answer(
+    return GradingAttempt(
+        score=final_score,
+        confidence=final_confidence,
+        ai_comment=grading_result.final_comment.strip(),
+        missing_points=_dedupe_strings(missing_points),
+        raw_response=raw_response,
+        rubric_results=rubric_results,
+        needs_human_review=needs_review,
+        model=model,
+        model_requested_review=grading_result.needs_human_review,
+        missing_rubric_evidence=missing_rubric_evidence,
+    )
+
+
+def _review_triggers_for_attempt(attempt: GradingAttempt) -> list[str]:
+    triggers: list[str] = []
+    if attempt.confidence == ConfidenceLevel.low:
+        triggers.append("low_confidence")
+    if attempt.model_requested_review:
+        triggers.append("model_requested_review")
+    if attempt.missing_rubric_evidence:
+        triggers.append("missing_rubric_evidence")
+    return triggers
+
+
+def _score_delta_exceeds_threshold(fast_score: Decimal, review_score: Decimal, max_score: Decimal) -> bool:
+    if max_score <= 0:
+        return False
+    return abs(fast_score - review_score) > _to_decimal(float(max_score) * settings.ai_grading_review_score_delta_ratio)
+
+
+def _build_answer_from_attempt(
+    *,
+    submission_id: int,
+    question: QuestionSnapshot,
+    answer_text: str,
+    source_page: int | None,
+    attempt: GradingAttempt,
+    needs_review: bool,
+) -> Answer:
+    return Answer(
         submission_id=submission_id,
         question_id=question.id,
         source_page=source_page,
         extracted_answer=answer_text,
-        score=final_score,
+        score=attempt.score,
         max_score=_to_decimal(question.max_score),
-        confidence=final_confidence.value,
-        ai_comment=grading_result.final_comment.strip(),
-        missing_points=_dedupe_strings(missing_points),
+        confidence=attempt.confidence.value,
+        ai_comment=attempt.ai_comment,
+        missing_points=attempt.missing_points,
         needs_human_review=needs_review,
         teacher_override_score=None,
         teacher_comment=None,
-        raw_ai_response=raw_response,
+        raw_ai_response=attempt.raw_response,
     )
-    return answer, rubric_results, needs_review
 
 
 def _build_grading_input(question: QuestionSnapshot, answer_text: str) -> dict[str, Any]:
@@ -611,6 +752,74 @@ def _build_empty_answer_fallback(
     return answer, rubric_results, True
 
 
+def review_answer_with_strong_model(
+    session: Session,
+    answer_id: int,
+    trigger: str = "score_variance",
+) -> Answer:
+    answer = session.execute(
+        select(Answer)
+        .where(Answer.id == answer_id)
+        .options(selectinload(Answer.question).selectinload(Question.rubric_items), selectinload(Answer.rubric_results))
+    ).scalar_one_or_none()
+    if answer is None:
+        raise PipelineError(f"Answer {answer_id} not found")
+    question = _snapshot_question(answer.question)
+    triggers = _dedupe_strings([*(answer.review_triggers or []), trigger])
+    if answer.review_score is not None:
+        answer.review_triggers = triggers
+        session.commit()
+        return answer
+    claimed = session.execute(
+        sa_update(Answer)
+        .where(Answer.id == answer_id, Answer.review_score.is_(None))
+        .values(review_decision="in_progress")
+    ).rowcount
+    if not claimed:
+        session.refresh(answer)
+        return answer
+    review_attempt = _call_grading_model(
+        question=question,
+        answer_text=answer.extracted_answer,
+        extraction_confidence=ConfidenceLevel(answer.confidence),
+        route_key="grading_review",
+    )
+    answer.review_triggers = triggers
+    if review_attempt is None:
+        answer.review_decision = "failed"
+        answer.needs_human_review = True
+        session.commit()
+        return answer
+
+    fast_score = answer.fast_score if answer.fast_score is not None else answer.score
+    answer.review_score = review_attempt.score
+    answer.review_confidence = review_attempt.confidence.value
+    answer.review_ai_comment = review_attempt.ai_comment
+    answer.review_missing_points = review_attempt.missing_points
+    answer.review_raw_ai_response = review_attempt.raw_response
+    answer.review_model = review_attempt.model
+    answer.review_decision = "accepted_review"
+    answer.score = review_attempt.score
+    answer.confidence = review_attempt.confidence.value
+    answer.ai_comment = review_attempt.ai_comment
+    answer.missing_points = review_attempt.missing_points
+    answer.raw_ai_response = review_attempt.raw_response
+    if _score_delta_exceeds_threshold(fast_score, review_attempt.score, question.max_score):
+        answer.review_triggers = _dedupe_strings([*triggers, "score_delta"])
+        answer.needs_human_review = True
+    else:
+        answer.needs_human_review = review_attempt.needs_human_review
+    for rubric_result in review_attempt.rubric_results:
+        rubric_result.answer_id = answer.id
+    session.execute(delete(AnswerRubricResult).where(AnswerRubricResult.answer_id == answer.id))
+    session.flush()
+    for rubric_result in review_attempt.rubric_results:
+        session.add(rubric_result)
+    _recalculate_submission_total(session, answer.submission_id)
+    session.commit()
+    return answer
+
+
 def _build_error_fallback(
     *,
     submission_id: int,
@@ -666,6 +875,7 @@ def _extract_submission_answers(
             },
             image_paths=image_paths,
             request_profile="vision",
+            route_key="vision_student_extraction",
         )
         return completion.data, completion.raw_text
     except Exception as exc:  # noqa: BLE001 - fall back to an empty extraction result for manual review
@@ -731,7 +941,7 @@ def _recalculate_submission_total(session: Session, submission_id: int) -> None:
     for answer in submission.answers:
         effective_score = answer.teacher_override_score if answer.teacher_override_score is not None else answer.score
         total += effective_score
-        any_review = any_review or answer.needs_human_review or answer.confidence == ConfidenceLevel.low.value
+        any_review = any_review or answer.needs_human_review
     submission.total_score = _to_decimal(total)
     submission.status = (
         SubmissionStatus.needs_review.value if any_review else SubmissionStatus.graded.value

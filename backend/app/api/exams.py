@@ -238,6 +238,8 @@ def get_exam_results(exam_id: int, session: Session = Depends(get_db)):
         exam=ExamDetail.model_validate(exam),
         questions=questions,
         rows=rows,
+        ai_review_active=data.get("ai_review_active", False),
+        ai_review_statuses=data.get("ai_review_statuses", []),
     )
 
 
@@ -281,15 +283,24 @@ def _load_exam_or_404(session: Session, exam_id: int) -> Exam:
 @router.delete("/{exam_id}")
 def delete_exam(exam_id: int, session: Session = Depends(get_db)):
     exam = _load_exam_or_404(session, exam_id)
-    storage = get_storage_service()
-    for exam_file in exam.files:
-        _remove_storage_file(storage, exam_file.storage_path)
+    file_paths = [exam_file.storage_path for exam_file in exam.files]
+    tree_paths = [f"rendered/exams/{exam.id}"]
     for submission in exam.submissions:
-        _remove_storage_file(storage, submission.original_pdf_path)
-        _remove_storage_tree(storage, f"rendered/submissions/{submission.id}")
-    _remove_storage_tree(storage, f"rendered/exams/{exam.id}")
+        file_paths.append(submission.original_pdf_path)
+        tree_paths.append(f"rendered/submissions/{submission.id}")
+    for batch in exam.batches:
+        file_paths.append(batch.source_storage_path)
+        tree_paths.append(f"rendered/batches/{batch.id}")
+        for candidate in batch.candidates:
+            if candidate.source_storage_path:
+                file_paths.append(candidate.source_storage_path)
     session.delete(exam)
     session.commit()
+    storage = get_storage_service()
+    for file_path in _dedupe_storage_paths(file_paths):
+        _remove_storage_file(storage, file_path)
+    for tree_path in _dedupe_storage_paths(tree_paths):
+        _remove_storage_tree(storage, tree_path)
     return {"message": f"Exam {exam_id} deleted"}
 
 
@@ -299,12 +310,14 @@ def delete_rubric_file(exam_id: int, file_id: int, session: Session = Depends(ge
     rubric_file = session.get(ExamFile, file_id)
     if rubric_file is None or rubric_file.exam_id != exam_id:
         raise HTTPException(status_code=404, detail="Rubric file not found")
-    storage = get_storage_service()
-    _remove_storage_file(storage, rubric_file.storage_path)
-    _remove_storage_tree(storage, f"rendered/exams/{exam_id}/rubric/{file_id}")
+    file_path = rubric_file.storage_path
+    tree_path = f"rendered/exams/{exam_id}/rubric/{file_id}"
     session.delete(rubric_file)
     exam.needs_rubric_review = True
     session.commit()
+    storage = get_storage_service()
+    _remove_storage_file(storage, file_path)
+    _remove_storage_tree(storage, tree_path)
     return {"message": f"Rubric file {file_id} deleted"}
 
 
@@ -326,6 +339,10 @@ async def _validate_pdf_upload_or_400(file: UploadFile) -> None:
         await validate_pdf_upload(file)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _dedupe_storage_paths(paths: list[str]) -> list[str]:
+    return list(dict.fromkeys(paths))
 
 
 def _remove_storage_file(storage, storage_path: str) -> None:

@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
 
 import { toClassNames } from '../lib/format'
@@ -8,11 +9,26 @@ const navItems = [
 ]
 
 export function AppShell() {
+  const [showBackToTop, setShowBackToTop] = useState(false)
+
+  useEffect(() => {
+    function handleScroll() {
+      setShowBackToTop(window.scrollY > 480)
+    }
+    handleScroll()
+    window.addEventListener('scroll', handleScroll, { passive: true })
+    return () => window.removeEventListener('scroll', handleScroll)
+  }, [])
+
+  function scrollToTop() {
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
   return (
     <div className="min-h-screen text-ink-950" style={{ backgroundImage: 'var(--page-texture)' }}>
       <div className="mx-auto flex min-h-screen max-w-[1600px] flex-col lg:flex-row">
-        <aside className="border-b border-ink-900/10 bg-ink-950 px-6 py-6 text-paper lg:w-80 lg:border-b-0 lg:border-r">
-          <div className="flex h-full flex-col justify-between gap-8">
+        <aside className="border-b border-ink-900/10 bg-ink-950 px-6 py-6 text-paper lg:sticky lg:top-0 lg:h-screen lg:w-80 lg:border-b-0 lg:border-r">
+          <div className="flex h-full flex-col gap-8 overflow-y-auto">
             <div>
               <div className="inline-flex items-center rounded-full border border-gold-200/30 bg-white/5 px-3 py-1 text-[11px] uppercase tracking-[0.28em] text-gold-100">
                 智能阅卷工作台
@@ -22,7 +38,7 @@ export function AppShell() {
                 面向手写和中英混合试卷的 AI 预评分系统，评分依据可追溯到每条评分标准和证据。
               </p>
             </div>
-            <nav className="space-y-2">
+            <nav className="sticky top-4 z-10 space-y-2 rounded-3xl bg-ink-950/95 py-2 backdrop-blur">
               {navItems.map((item) => (
                 <NavLink
                   key={item.to}
@@ -40,7 +56,7 @@ export function AppShell() {
                 </NavLink>
               ))}
             </nav>
-            <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-sm leading-6 text-slate-300">
+            <div className="mt-auto rounded-2xl border border-white/10 bg-white/5 p-4 text-sm leading-6 text-slate-300">
               <p className="font-semibold text-white">人工复核优先</p>
               <p className="mt-2">
                 每个分数都保留评分标准、证据片段和人工改分记录，方便老师复查。
@@ -54,6 +70,17 @@ export function AppShell() {
           </div>
         </main>
       </div>
+      <button
+        type="button"
+        onClick={scrollToTop}
+        aria-label="回到顶部"
+        className={toClassNames(
+          'fixed bottom-6 right-6 z-50 rounded-full border border-ink-900/10 bg-ink-950 px-4 py-3 text-sm font-semibold text-paper shadow-lift transition hover:bg-ink-800 focus:outline-none focus:ring-2 focus:ring-slateBlue-300 focus:ring-offset-2',
+          showBackToTop ? 'translate-y-0 opacity-100' : 'pointer-events-none translate-y-3 opacity-0',
+        )}
+      >
+        回到顶部
+      </button>
     </div>
   )
 }

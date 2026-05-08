@@ -1,12 +1,11 @@
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-grader}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-grader}
       POSTGRES_DB: ${POSTGRES_DB:-grader}
-    ports:
-      - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -17,8 +16,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -26,6 +24,7 @@ services:
       retries: 10
 
   backend:
+    restart: unless-stopped
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -43,6 +42,17 @@ services:
       AI_GRADING_API_KEY: ${AI_GRADING_API_KEY:-}
       AI_VISION_MODEL: ${AI_VISION_MODEL}
       AI_GRADING_MODEL: ${AI_GRADING_MODEL}
+      AI_VISION_CHAIN: ${AI_VISION_CHAIN:-}
+      AI_VISION_RUBRIC_CHAIN: ${AI_VISION_RUBRIC_CHAIN:-}
+      AI_VISION_STUDENT_EXTRACTION_CHAIN: ${AI_VISION_STUDENT_EXTRACTION_CHAIN:-}
+      AI_VISION_SPLIT_HEADER_CHAIN: ${AI_VISION_SPLIT_HEADER_CHAIN:-}
+      AI_GRADING_CHAIN: ${AI_GRADING_CHAIN:-}
+      AI_GRADING_REVIEW_ENABLED: ${AI_GRADING_REVIEW_ENABLED:-false}
+      AI_GRADING_REVIEW_MODEL: ${AI_GRADING_REVIEW_MODEL:-}
+      AI_GRADING_REVIEW_CHAIN: ${AI_GRADING_REVIEW_CHAIN:-}
+      AI_GRADING_REVIEW_SCORE_DELTA_RATIO: ${AI_GRADING_REVIEW_SCORE_DELTA_RATIO:-0.15}
+      AI_GRADING_REVIEW_VARIANCE_MIN_ANSWERS: ${AI_GRADING_REVIEW_VARIANCE_MIN_ANSWERS:-3}
+      AI_GRADING_REVIEW_VARIANCE_RANGE_RATIO: ${AI_GRADING_REVIEW_VARIANCE_RANGE_RATIO:-0.45}
       AI_GRADING_CONCURRENCY: ${AI_GRADING_CONCURRENCY:-4}
       AI_GRADING_GLOBAL_CONCURRENCY: ${AI_GRADING_GLOBAL_CONCURRENCY:-4}
       AI_GRADING_STRICTNESS: ${AI_GRADING_STRICTNESS:-moderate}
@@ -62,6 +72,7 @@ services:
       - "8000:8000"
 
   worker:
+    restart: unless-stopped
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -79,6 +90,17 @@ services:
       AI_GRADING_API_KEY: ${AI_GRADING_API_KEY:-}
       AI_VISION_MODEL: ${AI_VISION_MODEL}
       AI_GRADING_MODEL: ${AI_GRADING_MODEL}
+      AI_VISION_CHAIN: ${AI_VISION_CHAIN:-}
+      AI_VISION_RUBRIC_CHAIN: ${AI_VISION_RUBRIC_CHAIN:-}
+      AI_VISION_STUDENT_EXTRACTION_CHAIN: ${AI_VISION_STUDENT_EXTRACTION_CHAIN:-}
+      AI_VISION_SPLIT_HEADER_CHAIN: ${AI_VISION_SPLIT_HEADER_CHAIN:-}
+      AI_GRADING_CHAIN: ${AI_GRADING_CHAIN:-}
+      AI_GRADING_REVIEW_ENABLED: ${AI_GRADING_REVIEW_ENABLED:-false}
+      AI_GRADING_REVIEW_MODEL: ${AI_GRADING_REVIEW_MODEL:-}
+      AI_GRADING_REVIEW_CHAIN: ${AI_GRADING_REVIEW_CHAIN:-}
+      AI_GRADING_REVIEW_SCORE_DELTA_RATIO: ${AI_GRADING_REVIEW_SCORE_DELTA_RATIO:-0.15}
+      AI_GRADING_REVIEW_VARIANCE_MIN_ANSWERS: ${AI_GRADING_REVIEW_VARIANCE_MIN_ANSWERS:-3}
+      AI_GRADING_REVIEW_VARIANCE_RANGE_RATIO: ${AI_GRADING_REVIEW_VARIANCE_RANGE_RATIO:-0.45}
       AI_GRADING_CONCURRENCY: ${AI_GRADING_CONCURRENCY:-4}
       AI_GRADING_GLOBAL_CONCURRENCY: ${AI_GRADING_GLOBAL_CONCURRENCY:-4}
       AI_GRADING_STRICTNESS: ${AI_GRADING_STRICTNESS:-moderate}
@@ -97,6 +119,7 @@ services:
         condition: service_healthy
 
   frontend:
+    restart: unless-stopped
     build:
       context: .
       dockerfile: frontend/Dockerfile

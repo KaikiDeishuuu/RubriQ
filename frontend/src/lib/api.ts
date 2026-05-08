@@ -250,6 +250,14 @@ export async function exportResultsPdf(examId: number): Promise<Blob> {
   return response.blob()
 }
 
+export async function exportSubmissionPdf(submissionId: number): Promise<Blob> {
+  const response = await fetch(`${API_BASE_URL}/submissions/${submissionId}/export.pdf`)
+  if (!response.ok) {
+    throw new Error(await response.text())
+  }
+  return response.blob()
+}
+
 export async function deleteExam(examId: number): Promise<void> {
   await request<void>(`/exams/${examId}`, { method: 'DELETE' })
 }

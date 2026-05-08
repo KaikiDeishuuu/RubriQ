@@ -121,6 +121,19 @@ export interface Answer {
   teacher_override_score: string | number | null
   teacher_comment: string | null
   raw_ai_response: string | null
+  fast_score: string | number | null
+  fast_confidence: ConfidenceLevel | null
+  fast_ai_comment: string | null
+  fast_missing_points: string[] | null
+  fast_raw_ai_response: string | null
+  review_score: string | number | null
+  review_confidence: ConfidenceLevel | null
+  review_ai_comment: string | null
+  review_missing_points: string[] | null
+  review_raw_ai_response: string | null
+  review_triggers: string[]
+  review_decision: string
+  review_model: string | null
   question: Question
   rubric_results: AnswerRubricResult[]
   created_at: string
@@ -180,6 +193,8 @@ export interface SubmissionBatchDetail {
   split_version: number
   raw_split_extraction_response: Record<string, unknown> | null
   error_message: string | null
+  ai_review_status: string
+  ai_review_error_message: string | null
   created_at: string
   updated_at: string
   pages: BatchPage[]
@@ -221,6 +236,8 @@ export interface ExamResultRow {
   status: SubmissionStatus
   total_score: number
   needs_human_review: boolean
+  ai_reviewed_answer_count: number
+  pending_review_answer_count: number
   source_mode?: string | null
   split_confidence?: number | null
   split_confirmed?: boolean
@@ -233,6 +250,8 @@ export interface ExamResultsResponse {
   exam: ExamDetail
   questions: Question[]
   rows: ExamResultRow[]
+  ai_review_active: boolean
+  ai_review_statuses: string[]
 }
 
 export interface PageUploadResponse {
@@ -283,4 +302,5 @@ export interface RubricItemUpdatePayload {
 export interface SubmissionOverridePayload {
   teacher_override_score?: number | null
   teacher_comment?: string | null
+  reviewed?: boolean | null
 }

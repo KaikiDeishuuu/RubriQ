@@ -5,7 +5,7 @@ from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.models import Answer, Exam, Question, RubricItem, Submission
+from app.models import Answer, BatchSplitCandidate, Exam, Question, RubricItem, Submission, SubmissionBatch
 from app.schemas.exam import ExamDetail, ExamListItem, QuestionRead, RubricItemRead
 from app.schemas.submission import (
     AnswerDetail,
@@ -25,6 +25,7 @@ def load_exam_detail(session: Session, exam_id: int) -> Exam:
             selectinload(Exam.files),
             selectinload(Exam.questions).selectinload(Question.rubric_items),
             selectinload(Exam.submissions),
+            selectinload(Exam.batches).selectinload(SubmissionBatch.candidates).selectinload(BatchSplitCandidate.submission),
         )
     )
     exam = session.execute(stmt).scalar_one_or_none()

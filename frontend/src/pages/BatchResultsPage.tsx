@@ -44,7 +44,7 @@ export function BatchResultsPage() {
   }, [numericExamId])
 
   useEffect(() => {
-    if (!data?.rows.some((row) => isSubmissionActive(row.status))) {
+    if (!data?.ai_review_active && !data?.rows.some((row) => isSubmissionActive(row.status))) {
       return
     }
     const timerId = window.setInterval(() => {
@@ -119,6 +119,8 @@ export function BatchResultsPage() {
   const gradedCount = data?.rows.filter((row) => row.status === 'graded').length ?? 0
   const reviewCount = data?.rows.filter((row) => row.status === 'needs_review').length ?? 0
   const failedCount = data?.rows.filter((row) => row.status === 'failed').length ?? 0
+  const aiReviewedCount = data?.rows.reduce((total, row) => total + row.ai_reviewed_answer_count, 0) ?? 0
+  const pendingAnswerReviewCount = data?.rows.reduce((total, row) => total + row.pending_review_answer_count, 0) ?? 0
 
   return (
     <div className="space-y-6">
@@ -154,15 +156,19 @@ export function BatchResultsPage() {
           </div>
         }
       >
-        <div className="grid gap-4 md:grid-cols-4">
+        <div className="grid gap-4 md:grid-cols-6">
           <Metric label="答卷数" value={String(data?.rows.length ?? 0)} />
           <Metric label="已评分" value={String(gradedCount)} />
-          <Metric label="待复核" value={String(reviewCount)} />
+          <Metric label="待复核答卷" value={String(reviewCount)} />
+          <Metric label="AI 复审题" value={String(aiReviewedCount)} />
+          <Metric label="待复核题" value={String(pendingAnswerReviewCount)} />
           <Metric label="失败" value={String(failedCount)} />
         </div>
       </SectionCard>
 
       {loading ? <Message message="正在加载批量结果..." /> : null}
+      {data?.ai_review_active ? <Message message="强模型正在复审同题分差较大的答案，页面会自动刷新直到完成。" /> : null}
+      {data?.ai_review_statuses.includes('failed') ? <Message message="部分批次 AI 复审失败，相关题目已标记为待教师复核。" tone="error" /> : null}
       {error ? <Message message={error} tone="error" /> : null}
 
       {data ? (

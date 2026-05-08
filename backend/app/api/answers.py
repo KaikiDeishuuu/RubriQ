@@ -17,12 +17,16 @@ def override_answer_score(
     payload: SubmissionOverride,
     session: Session = Depends(get_db),
 ):
+    fields_set = payload.model_fields_set
     try:
         answer = apply_teacher_override(
             session=session,
             answer_id=answer_id,
             teacher_override_score=payload.teacher_override_score,
             teacher_comment=payload.teacher_comment,
+            reviewed=payload.reviewed,
+            update_teacher_override_score="teacher_override_score" in fields_set,
+            update_teacher_comment="teacher_comment" in fields_set,
         )
     except PipelineError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

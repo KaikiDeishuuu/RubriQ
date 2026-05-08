@@ -16,6 +16,7 @@ export function RubricReviewPage() {
 	const [feedback, setFeedback] = useState<string | null>(null)
 	const [selectedFile, setSelectedFile] = useState<File | null>(null)
 	const [busy, setBusy] = useState(false)
+	const [parsing, setParsing] = useState(false)
 
 	useEffect(() => {
 		void loadExam()
@@ -63,14 +64,18 @@ export function RubricReviewPage() {
 		const rubricFiles = exam.files.filter((file) => file.file_type === 'rubric_pdf')
 		const latestFile = rubricFiles[rubricFiles.length - 1]
 		setBusy(true)
-		setFeedback(null)
+		setParsing(true)
+		setError(null)
+		setFeedback('正在解析评分标准 PDF，通常需要几十秒，请不要关闭页面。')
 		try {
 			const parsed = await parseRubricPdf(numericExamId, latestFile?.id)
 			setExam(parsed)
 			setFeedback('评分标准解析成功，请在下方检查识别出的题目和评分项。')
 		} catch (error) {
+			setFeedback(null)
 			setError(error instanceof Error ? error.message : '解析评分标准 PDF 失败')
 		} finally {
+			setParsing(false)
 			setBusy(false)
 		}
 	}
@@ -190,8 +195,9 @@ export function RubricReviewPage() {
 			</SectionCard>
 
 			{loading ? <Message message="正在加载评分标准..." /> : null}
+			{parsing ? <ParsingProgress /> : null}
 			{error ? <Message message={error} tone="error" /> : null}
-			{feedback ? <Message message={feedback} tone="success" /> : null}
+			{feedback ? <Message message={feedback} tone={parsing ? 'neutral' : 'success'} /> : null}
 
 			<div className="grid gap-6 xl:grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)]">
 				<SectionCard title="上传并解析" description="先上传评分标准 PDF，解析后会生成可编辑的题目和评分项。">
@@ -213,7 +219,7 @@ export function RubricReviewPage() {
 								disabled={!selectedFile || busy}
 								className="rounded-full bg-ink-950 px-5 py-3 text-sm font-semibold text-paper transition hover:bg-ink-800 disabled:cursor-not-allowed disabled:opacity-50"
 							>
-								上传评分标准 PDF
+								{busy && !parsing ? '正在上传...' : '上传评分标准 PDF'}
 							</button>
 							<button
 								type="button"
@@ -221,7 +227,7 @@ export function RubricReviewPage() {
 								disabled={busy || !latestRubricFile}
 								className="rounded-full border border-slateBlue-200 bg-slateBlue-50 px-5 py-3 text-sm font-semibold text-slateBlue-500 transition hover:bg-slateBlue-100 disabled:cursor-not-allowed disabled:opacity-50"
 							>
-								解析最新评分标准
+								{parsing ? '正在解析...' : '解析最新评分标准'}
 							</button>
 						</div>
 						{latestRubricFile ? (
@@ -468,6 +474,20 @@ function QuestionEditorCard({
 				</div>
 			</form>
 		</article>
+	)
+}
+
+function ParsingProgress() {
+	return (
+		<div className="rounded-2xl border border-slateBlue-200 bg-slateBlue-50 px-4 py-4 text-sm text-slateBlue-500">
+			<div className="flex items-center gap-3 font-semibold">
+				<span className="h-3 w-3 animate-pulse rounded-full bg-slateBlue-400" />
+				正在调用视觉模型解析评分标准
+			</div>
+			<div className="mt-2 text-xs leading-5 text-ink-700">
+				正在渲染 PDF 页面、识别题目和评分项。大文件或模型响应较慢时可能需要几十秒到数分钟，完成后页面会自动显示解析结果。
+			</div>
+		</div>
 	)
 }
 

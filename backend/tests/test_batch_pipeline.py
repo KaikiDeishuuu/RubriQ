@@ -10,7 +10,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.core.config import settings
 from app.db.base import Base
-from app.models import BatchStatus, BatchUploadMode, Exam, SubmissionBatch, SubmissionStatus
+from app.models import BatchStatus, BatchUploadMode, Exam, Question, Submission, SubmissionBatch, SubmissionStatus
 from app.schemas.batch import BatchCandidateUpdate
 from app.services import batch_pipeline
 from app.services.batch_pipeline import (
@@ -18,6 +18,8 @@ from app.services.batch_pipeline import (
     confirm_batch_split,
     parse_student_identity_from_filename,
     prepare_batch_split,
+    refresh_batch_grading_status,
+    start_batch_grading,
     update_batch_candidates,
 )
 
@@ -137,7 +139,13 @@ def test_auto_split_low_confidence_requires_review(session, monkeypatch: pytest.
         _fake_completion("Alice", "S001", 0.95),
         _fake_completion("Bob", "S002", 0.4),
     ])
-    monkeypatch.setattr(batch_pipeline, "call_structured_json", lambda **_kwargs: next(responses))
+    seen_route_keys: list[str | None] = []
+
+    def fake_call_structured_json(**kwargs):
+        seen_route_keys.append(kwargs.get("route_key"))
+        return next(responses)
+
+    monkeypatch.setattr(batch_pipeline, "call_structured_json", fake_call_structured_json)
 
     prepared = prepare_batch_split(session, batch.id)
 
@@ -145,11 +153,138 @@ def test_auto_split_low_confidence_requires_review(session, monkeypatch: pytest.
     assert len(prepared.candidates) == 2
     assert prepared.candidates[0].needs_review is False
     assert prepared.candidates[1].needs_review is True
+    assert seen_route_keys == ["vision_split_header", "vision_split_header"]
+
+
+def test_start_batch_grading_rejects_exam_without_gradable_questions(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    exam = Exam(title="No Questions")
+    session.add(exam)
+    session.flush()
+    batch = SubmissionBatch(
+        exam_id=exam.id,
+        mode=BatchUploadMode.zip.value,
+        status=BatchStatus.ready_for_grading.value,
+        source_filename="batch.zip",
+        source_storage_path="batch.zip",
+    )
+    session.add(batch)
+    session.flush()
+    submission = _create_submission(session, exam.id, batch.id, SubmissionStatus.uploaded.value)
+    session.commit()
+    queued_ids: list[int] = []
+    monkeypatch.setattr("app.workers.tasks.process_submission_task.delay", queued_ids.append)
+
+    with pytest.raises(BatchPipelineError, match="parse the rubric"):
+        start_batch_grading(session, batch.id)
+
+    assert queued_ids == []
+    assert session.get(Submission, submission.id).status == SubmissionStatus.uploaded.value
+    assert session.get(SubmissionBatch, batch.id).status == BatchStatus.ready_for_grading.value
+
+
+
+def test_start_batch_grading_only_queues_uploaded_and_failed_submissions(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    exam = _create_exam(session)
+    batch = SubmissionBatch(
+        exam_id=exam.id,
+        mode=BatchUploadMode.zip.value,
+        status=BatchStatus.ready_for_grading.value,
+        source_filename="batch.zip",
+        source_storage_path="batch.zip",
+    )
+    session.add(batch)
+    session.flush()
+    statuses = [
+        SubmissionStatus.uploaded.value,
+        SubmissionStatus.failed.value,
+        SubmissionStatus.graded.value,
+        SubmissionStatus.needs_review.value,
+        SubmissionStatus.grading.value,
+    ]
+    submissions = [_create_submission(session, exam.id, batch.id, status) for status in statuses]
+    session.commit()
+    queued_ids: list[int] = []
+    monkeypatch.setattr("app.workers.tasks.process_submission_task.delay", queued_ids.append)
+
+    updated_batch, queued_count = start_batch_grading(session, batch.id)
+
+    assert queued_count == 2
+    assert queued_ids == [submissions[0].id, submissions[1].id]
+    assert updated_batch.status == BatchStatus.grading.value
+    assert session.get(Submission, submissions[0].id).status == SubmissionStatus.processing.value
+    assert session.get(Submission, submissions[1].id).status == SubmissionStatus.processing.value
+    assert session.get(Submission, submissions[2].id).status == SubmissionStatus.graded.value
+
+
+def test_refresh_batch_grading_status_marks_completed_when_all_finished(session) -> None:
+    exam = _create_exam(session)
+    batch = SubmissionBatch(
+        exam_id=exam.id,
+        mode=BatchUploadMode.zip.value,
+        status=BatchStatus.grading.value,
+        source_filename="batch.zip",
+        source_storage_path="batch.zip",
+    )
+    session.add(batch)
+    session.flush()
+    _create_submission(session, exam.id, batch.id, SubmissionStatus.graded.value)
+    _create_submission(session, exam.id, batch.id, SubmissionStatus.needs_review.value)
+    session.commit()
+
+    updated_batch = refresh_batch_grading_status(session, batch.id)
+
+    assert updated_batch.status == BatchStatus.completed.value
+
+
+def test_refresh_batch_grading_status_marks_completed_with_errors_for_failed_submissions(session) -> None:
+    exam = _create_exam(session)
+    batch = SubmissionBatch(
+        exam_id=exam.id,
+        mode=BatchUploadMode.zip.value,
+        status=BatchStatus.grading.value,
+        source_filename="batch.zip",
+        source_storage_path="batch.zip",
+    )
+    session.add(batch)
+    session.flush()
+    _create_submission(session, exam.id, batch.id, SubmissionStatus.graded.value)
+    _create_submission(session, exam.id, batch.id, SubmissionStatus.failed.value)
+    session.commit()
+
+    updated_batch = refresh_batch_grading_status(session, batch.id)
+
+    assert updated_batch.status == BatchStatus.completed_with_errors.value
+
+
+def test_start_batch_grading_refreshes_status_when_no_submissions_are_queued(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    exam = _create_exam(session)
+    batch = SubmissionBatch(
+        exam_id=exam.id,
+        mode=BatchUploadMode.zip.value,
+        status=BatchStatus.ready_for_grading.value,
+        source_filename="batch.zip",
+        source_storage_path="batch.zip",
+    )
+    session.add(batch)
+    session.flush()
+    _create_submission(session, exam.id, batch.id, SubmissionStatus.graded.value)
+    _create_submission(session, exam.id, batch.id, SubmissionStatus.needs_review.value)
+    session.commit()
+    queued_ids: list[int] = []
+    monkeypatch.setattr("app.workers.tasks.process_submission_task.delay", queued_ids.append)
+
+    updated_batch, queued_count = start_batch_grading(session, batch.id)
+
+    assert queued_count == 0
+    assert queued_ids == []
+    assert updated_batch.status == BatchStatus.completed.value
 
 
 def _create_exam(session) -> Exam:
     exam = Exam(title="Sample")
     session.add(exam)
+    session.flush()
+    session.add(Question(exam_id=exam.id, question_no="1", title="Question 1"))
     session.commit()
     return exam
 
@@ -172,6 +307,21 @@ def _create_batch(session, exam_id: int, mode: str, source_path: Path, pages_per
     session.add(batch)
     session.commit()
     return batch
+
+
+def _create_submission(session, exam_id: int, batch_id: int, status: str) -> Submission:
+    submission = Submission(
+        exam_id=exam_id,
+        batch_id=batch_id,
+        student_name="Student",
+        student_id="S001",
+        original_pdf_path=f"submissions/{status}.pdf",
+        status=status,
+        split_confirmed=True,
+    )
+    session.add(submission)
+    session.flush()
+    return submission
 
 
 def _create_pdf(path: Path, page_count: int) -> None:

@@ -6,6 +6,8 @@ import { SectionCard } from '../components/SectionCard'
 import { StatusBadge } from '../components/StatusBadge'
 import {
   buildStorageUrl,
+  downloadBlob,
+  exportSubmissionPdf,
   getSubmission,
   overrideAnswer,
   processSubmission,
@@ -23,7 +25,9 @@ export function SubmissionReviewPage() {
   const [selectedPageIndex, setSelectedPageIndex] = useState(0)
   const [selectedQuestionId, setSelectedQuestionId] = useState<number | null>(null)
   const [processing, setProcessing] = useState(false)
+  const [exportingPdf, setExportingPdf] = useState(false)
   const [savingOverride, setSavingOverride] = useState(false)
+  const [savingReviewFlag, setSavingReviewFlag] = useState(false)
   const loadingRef = useRef(false)
   const backgroundLoadingRef = useRef(false)
   const manualQuestionSelectionRef = useRef(false)
@@ -96,6 +100,21 @@ export function SubmissionReviewPage() {
     }
   }
 
+  async function handleExportPdf() {
+    if (!submission || submissionIsActive) {
+      return
+    }
+    setExportingPdf(true)
+    try {
+      const blob = await exportSubmissionPdf(submission.id)
+      await downloadBlob(blob, `submission-${submission.id}-review.pdf`)
+    } catch (error) {
+      setError(error instanceof Error ? error.message : '导出评分说明 PDF 失败')
+    } finally {
+      setExportingPdf(false)
+    }
+  }
+
   async function handleOverride(event: FormEvent<HTMLFormElement>, answer: Answer) {
     event.preventDefault()
     setSavingOverride(true)
@@ -115,6 +134,18 @@ export function SubmissionReviewPage() {
     }
   }
 
+  async function handleReviewFlag(answer: Answer, reviewed: boolean) {
+    setSavingReviewFlag(true)
+    try {
+      await overrideAnswer(answer.id, { reviewed })
+      await loadSubmission()
+    } catch (error) {
+      setError(error instanceof Error ? error.message : '保存复核状态失败')
+    } finally {
+      setSavingReviewFlag(false)
+    }
+  }
+
   const pages =
     submission?.pages.map((page) => ({
       label: `Page ${page.page_no}`,
@@ -126,6 +157,8 @@ export function SubmissionReviewPage() {
   const activeAnswer = activeQuestion ? answerByQuestion.get(activeQuestion.id) ?? null : null
   const completedQuestionCount = submission?.answers.length ?? 0
   const totalQuestionCount = submission?.exam.questions.length ?? 0
+  const reviewedQuestionCount = submission?.answers.filter((answer) => !answer.needs_human_review).length ?? 0
+  const pendingReviewQuestionCount = submission?.answers.filter((answer) => answer.needs_human_review).length ?? 0
   const submissionIsActive = submission ? isSubmissionActive(submission.status) : false
   const splitLocked = Boolean(submission?.batch_id !== null && submission && !submission.split_confirmed)
   const completedQuestion = submission?.exam.questions.find((question) => answerByQuestion.has(question.id)) ?? null
@@ -157,6 +190,14 @@ export function SubmissionReviewPage() {
             </Link>
             <button
               type="button"
+              onClick={() => void handleExportPdf()}
+              disabled={exportingPdf || !submission || submissionIsActive}
+              className="rounded-full border border-ink-900/10 bg-white px-4 py-2 text-sm font-semibold text-ink-950 transition hover:bg-paper disabled:opacity-50"
+            >
+              {exportingPdf ? '正在导出...' : '导出评分说明 PDF'}
+            </button>
+            <button
+              type="button"
               onClick={() => void handleProcess()}
               disabled={processing || !submission || submissionIsActive || splitLocked}
               className="rounded-full bg-ink-950 px-4 py-2 text-sm font-semibold text-paper transition hover:bg-ink-800 disabled:opacity-50"
@@ -166,11 +207,13 @@ export function SubmissionReviewPage() {
           </div>
         }
       >
-        <div className="grid gap-4 md:grid-cols-5">
+        <div className="grid gap-4 md:grid-cols-4 xl:grid-cols-7">
           <Metric label="学生" value={submission?.student_name || '未知'} />
           <Metric label="学号" value={submission?.student_id || '待识别'} />
           <Metric label="总分" value={formatScore(submission?.total_score ?? 0)} />
-          <Metric label="来源" value={submission?.source_mode ? `${formatSourceMode(submission.source_mode)}${submission.split_confidence !== null ? ` ${Math.round((submission.split_confidence ?? 0) * 100)}%` : ''}` : '单独上传'} />
+          <Metric label="复核进度" value={`${reviewedQuestionCount}/${completedQuestionCount || totalQuestionCount}`} />
+          <Metric label="待复核" value={String(pendingReviewQuestionCount)} />
+          <Metric label="来源" value={submission?.source_mode ? formatSourceMode(submission.source_mode) : '单份上传'} />
           <div className="rounded-2xl border border-ink-900/10 bg-white px-4 py-4 shadow-sm">
             <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-ink-700">状态</div>
             <div className="mt-3">
@@ -200,6 +243,7 @@ export function SubmissionReviewPage() {
                       : submissionIsActive
                         ? '评分中'
                         : '暂无答案'
+                    const hasAiReview = Boolean(answer?.review_score !== null && answer?.review_score !== undefined)
                     return (
                       <button
                         type="button"
@@ -222,7 +266,13 @@ export function SubmissionReviewPage() {
                           <div className="font-semibold text-ink-950">{question.question_no}</div>
                           <span className="text-xs font-semibold text-ink-700">{labelScore}</span>
                         </div>
-                        <p className="mt-2 line-clamp-2 text-sm text-ink-700">{question.title}</p>
+                        <div className="mt-2 flex items-start justify-between gap-3">
+                          <p className="line-clamp-2 text-sm text-ink-700">{question.title}</p>
+                          <div className="flex shrink-0 flex-col items-end gap-1">
+                            {hasAiReview ? <AiReviewBadge /> : null}
+                            <ReviewBadge answer={answer} active={submissionIsActive} />
+                          </div>
+                        </div>
                       </button>
                     )
                   })}
@@ -245,11 +295,14 @@ export function SubmissionReviewPage() {
             >
               {activeQuestion && activeAnswer ? (
                 <div className="space-y-5">
-                  <div className="grid gap-3 grid-cols-3">
+                  <div className="grid gap-3 md:grid-cols-4">
                     <InfoTile label="AI 得分" value={`${formatScore(activeAnswer.score)} / ${formatScore(activeAnswer.max_score)}`} />
                     <InfoTile label="置信度" value={formatConfidence(activeAnswer.confidence)} tone={activeAnswer.confidence} />
-                    <InfoTile label="需要复核" value={activeAnswer.needs_human_review ? '是' : '否'} />
+                    <InfoTile label="复核状态" value={activeAnswer.needs_human_review ? '待复核' : '已复核'} />
+                    <InfoTile label="最终得分" value={`${formatScore(activeAnswer.effective_score)} / ${formatScore(activeAnswer.max_score)}`} />
                   </div>
+
+                  <AiReviewPanel answer={activeAnswer} />
 
                   <div className="rounded-2xl border border-ink-900/10 bg-paper p-5">
                     <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-ink-700">识别出的答案</div>
@@ -341,22 +394,42 @@ export function SubmissionReviewPage() {
                             className="w-full rounded-2xl border border-ink-900/10 bg-paper px-4 py-3 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
                           />
                         </label>
-                        <button
-                          type="submit"
-                          disabled={savingOverride}
-                          className="rounded-full bg-ink-950 px-5 py-3 text-sm font-semibold text-paper transition hover:bg-ink-800 disabled:opacity-50"
-                        >
-                          {savingOverride ? '正在保存...' : '保存改分'}
-                        </button>
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            type="submit"
+                            disabled={savingOverride}
+                            className="rounded-full bg-ink-950 px-5 py-3 text-sm font-semibold text-paper transition hover:bg-ink-800 disabled:opacity-50"
+                          >
+                            {savingOverride ? '正在保存...' : '保存改分'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleReviewFlag(activeAnswer, true)}
+                            disabled={savingReviewFlag || !activeAnswer.needs_human_review}
+                            className="rounded-full border border-sage-200 bg-sage-50 px-5 py-3 text-sm font-semibold text-sage-400 transition hover:bg-sage-100 disabled:opacity-50"
+                          >
+                            {savingReviewFlag ? '正在保存...' : '确认本题已复核'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleReviewFlag(activeAnswer, false)}
+                            disabled={savingReviewFlag || activeAnswer.needs_human_review}
+                            className="rounded-full border border-gold-200 bg-gold-50 px-5 py-3 text-sm font-semibold text-amber-800 transition hover:bg-gold-100 disabled:opacity-50"
+                          >
+                            重新标记需复核
+                          </button>
+                        </div>
                       </form>
                     </div>
                   </div>
 
                   <details className="rounded-2xl border border-ink-900/10 bg-paper p-4">
                     <summary className="cursor-pointer text-sm font-semibold text-ink-950">AI 原始响应</summary>
-                    <pre className="mt-3 overflow-auto whitespace-pre-wrap text-xs leading-6 text-ink-800">
-                      {activeAnswer.raw_ai_response || '暂无原始响应。'}
-                    </pre>
+                    <div className="mt-3 space-y-3">
+                      <RawResponseBlock title="最终 AI 原始响应" value={activeAnswer.raw_ai_response} />
+                      <RawResponseBlock title="快速评分原始响应" value={activeAnswer.fast_raw_ai_response} />
+                      <RawResponseBlock title="强模型复审原始响应" value={activeAnswer.review_raw_ai_response} />
+                    </div>
                   </details>
                 </div>
               ) : (
@@ -531,6 +604,119 @@ function Metric({ label, value }: { label: string; value: string }) {
       <div className="mt-2 font-display text-2xl text-ink-950">{value}</div>
     </div>
   )
+}
+
+function AiReviewBadge() {
+  return (
+    <span className="rounded-full bg-slateBlue-50 px-2.5 py-1 text-[11px] font-semibold text-slateBlue-500 ring-1 ring-inset ring-slateBlue-200">
+      已复审
+    </span>
+  )
+}
+
+function ReviewBadge({ answer, active }: { answer: Answer | undefined; active: boolean }) {
+  if (!answer) {
+    return (
+      <span className="shrink-0 rounded-full bg-paper px-2.5 py-1 text-[11px] font-semibold text-ink-700 ring-1 ring-inset ring-ink-900/10">
+        {active ? '评分中' : '未评分'}
+      </span>
+    )
+  }
+  return answer.needs_human_review ? (
+    <span className="shrink-0 rounded-full bg-gold-50 px-2.5 py-1 text-[11px] font-semibold text-amber-800 ring-1 ring-inset ring-gold-200">
+      待复核
+    </span>
+  ) : (
+    <span className="shrink-0 rounded-full bg-sage-100 px-2.5 py-1 text-[11px] font-semibold text-sage-400 ring-1 ring-inset ring-sage-200">
+      已复核
+    </span>
+  )
+}
+
+function AiReviewPanel({ answer }: { answer: Answer }) {
+  const hasReview = answer.review_score !== null && answer.review_score !== undefined
+  const triggers = answer.review_triggers ?? []
+  if (!hasReview && triggers.length === 0 && answer.review_decision === 'not_required') {
+    return null
+  }
+  return (
+    <div className="rounded-2xl border border-slateBlue-200 bg-slateBlue-50/60 p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slateBlue-500">AI 复审</div>
+          <p className="mt-1 text-sm text-ink-700">快速模型先评分，触发质量规则后由强模型复审；最终仍由老师确认。</p>
+        </div>
+        <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slateBlue-500 ring-1 ring-inset ring-slateBlue-200">
+          {formatReviewDecision(answer.review_decision)}
+        </span>
+      </div>
+      <div className="mt-4 grid gap-3 md:grid-cols-3">
+        <InfoTile label="快速得分" value={answer.fast_score !== null && answer.fast_score !== undefined ? `${formatScore(answer.fast_score)} / ${formatScore(answer.max_score)}` : '-'} tone={answer.fast_confidence ?? undefined} />
+        <InfoTile label="复审得分" value={hasReview ? `${formatScore(answer.review_score)} / ${formatScore(answer.max_score)}` : '未复审'} tone={answer.review_confidence ?? undefined} />
+        <InfoTile label="分差" value={formatReviewDelta(answer)} />
+      </div>
+      {triggers.length > 0 ? (
+        <div className="mt-4 flex flex-wrap gap-2">
+          {triggers.map((trigger) => (
+            <span key={trigger} className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-ink-700 ring-1 ring-inset ring-ink-900/10">
+              {formatReviewTrigger(trigger)}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+function RawResponseBlock({ title, value }: { title: string; value: string | null }) {
+  return (
+    <div>
+      <div className="text-xs font-semibold text-ink-700">{title}</div>
+      <pre className="mt-1 overflow-auto whitespace-pre-wrap rounded-2xl bg-white p-3 text-xs leading-6 text-ink-800 ring-1 ring-inset ring-ink-900/10">
+        {value || '暂无原始响应。'}
+      </pre>
+    </div>
+  )
+}
+
+function formatReviewDelta(answer: Answer): string {
+  if (answer.fast_score === null || answer.fast_score === undefined || answer.review_score === null || answer.review_score === undefined) {
+    return '-'
+  }
+  const delta = Math.abs(Number(answer.review_score) - Number(answer.fast_score))
+  return formatScore(delta)
+}
+
+function formatReviewDecision(decision: string): string {
+  switch (decision) {
+    case 'accepted_review':
+      return '采用强模型复审'
+    case 'failed':
+      return '复审失败，需老师复核'
+    case 'kept_fast':
+      return '保留快速评分'
+    case 'needs_teacher_review':
+      return '需老师复核'
+    default:
+      return '无需强模型复审'
+  }
+}
+
+function formatReviewTrigger(trigger: string): string {
+  switch (trigger) {
+    case 'low_confidence':
+      return '低置信度'
+    case 'model_requested_review':
+      return '模型建议复核'
+    case 'missing_rubric_evidence':
+      return '评分项证据不足'
+    case 'score_variance':
+      return '同题分差较大'
+    case 'score_delta':
+      return '快慢模型分差较大'
+    default:
+      return trigger
+  }
 }
 
 function InfoTile({ label, value, tone }: { label: string; value: string; tone?: ConfidenceLevel }) {
