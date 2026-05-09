@@ -210,6 +210,7 @@ class Submission(Base, TimestampMixin):
     split_confirmed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     deduction_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     deduction_summary_edited: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    teacher_finalized: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     exam: Mapped[Exam] = relationship(back_populates="submissions")
     batch: Mapped[SubmissionBatch | None] = relationship(back_populates="submissions", foreign_keys=[batch_id])

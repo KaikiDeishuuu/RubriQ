@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.api.common import load_submission_detail, serialize_submission_detail
 from app.api.deps import get_db
 from app.models import Submission, SubmissionStatus
-from app.schemas.submission import DeductionSummaryUpdate, ProcessResponse, SubmissionDetail
+from app.schemas.submission import DeductionSummaryUpdate, ProcessResponse, SubmissionDetail, TeacherFinalizedUpdate
 from app.services.export import build_submission_review_pdf
 from app.services.pipeline import PipelineError, set_teacher_deduction_summary
 from app.storage.local import get_storage_service
@@ -55,6 +55,12 @@ def start_submission_processing(submission_id: int, session: Session = Depends(g
     submission = _load_submission_or_404(session, submission_id)
     if submission.batch_id is not None and not submission.split_confirmed:
         raise HTTPException(status_code=409, detail="Batch submission split must be confirmed before grading")
+    exam = submission.exam
+    if submission.batch_id is not None and exam is not None and exam.roster_status != "confirmed":
+        raise HTTPException(
+            status_code=409,
+            detail="考试名单尚未确认，请先在「考试名单」步骤上传并确认名单后再开始批改。",
+        )
     if submission.status in ACTIVE_SUBMISSION_STATUSES:
         return ProcessResponse(submission_id=submission.id, status=submission.status)
     if submission.status not in STARTABLE_SUBMISSION_STATUSES:
@@ -84,6 +90,18 @@ def update_deduction_summary(
         set_teacher_deduction_summary(session, submission_id, payload.summary, reset=payload.reset)
     except PipelineError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return serialize_submission_detail(load_submission_detail(session, submission_id))
+
+
+@router.put("/{submission_id}/teacher-finalized", response_model=SubmissionDetail)
+def update_teacher_finalized(
+    submission_id: int,
+    payload: TeacherFinalizedUpdate,
+    session: Session = Depends(get_db),
+):
+    submission = _load_submission_or_404(session, submission_id)
+    submission.teacher_finalized = payload.teacher_finalized
+    session.commit()
     return serialize_submission_detail(load_submission_detail(session, submission_id))
 
 

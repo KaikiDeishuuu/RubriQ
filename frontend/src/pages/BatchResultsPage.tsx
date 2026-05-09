@@ -13,6 +13,7 @@ import {
 import { formatScore, isSubmissionActive, toClassNames } from '../lib/format'
 import type { ExamResultsResponse } from '../lib/types'
 import { ConfirmDialog } from '../components/ConfirmDialog'
+import { ExamWizardSteps, WizardNav, emptyWizardStatus } from '../components/ExamWizard'
 import { SectionCard } from '../components/SectionCard'
 import { StatusBadge } from '../components/StatusBadge'
 
@@ -111,8 +112,9 @@ export function BatchResultsPage() {
     setExporting(format)
     try {
       const blob = await exportResults(format, numericExamId)
+      const examTitle = (data?.exam.title ?? '').trim()
       const filename = format === 'zip'
-        ? `exam-${numericExamId}-submissions.zip`
+        ? `${sanitizeFilename(examTitle) || `exam-${numericExamId}`}-评分说明.zip`
         : `exam-${numericExamId}-results.${format}`
       await downloadBlob(blob, filename)
     } catch (error) {
@@ -122,18 +124,38 @@ export function BatchResultsPage() {
     }
   }
 
+  function sanitizeFilename(value: string): string {
+    return value.replace(/[<>:"/\\|?*\x00-\x1f]+/g, '_').replace(/^[._]+|[._]+$/g, '').trim()
+  }
+
   const exam = data?.exam
   const gradedCount = data?.rows.filter((row) => row.status === 'graded').length ?? 0
   const reviewCount = data?.rows.filter((row) => row.status === 'needs_review').length ?? 0
   const failedCount = data?.rows.filter((row) => row.status === 'failed').length ?? 0
   const aiReviewedCount = data?.rows.reduce((total, row) => total + row.ai_reviewed_answer_count, 0) ?? 0
   const pendingAnswerReviewCount = data?.rows.reduce((total, row) => total + row.pending_review_answer_count, 0) ?? 0
+  const teacherFinalizedCount = data?.rows.filter((row) => row.teacher_finalized).length ?? 0
 
   return (
     <div className="space-y-6">
+      <ExamWizardSteps
+        current="results"
+        examId={Number.isFinite(numericExamId) ? numericExamId : null}
+        status={{
+          ...emptyWizardStatus(),
+          rubricDone: Boolean(exam && !exam.needs_rubric_review && exam.questions.length > 0),
+          rosterDone: Boolean(exam && exam.roster_status === 'confirmed'),
+          submissionsReady: (data?.rows.length ?? 0) > 0,
+          hasResults: gradedCount > 0 || reviewCount > 0,
+        }}
+      />
+      <WizardNav
+        examId={Number.isFinite(numericExamId) ? numericExamId : null}
+        prev={Number.isFinite(numericExamId) ? { label: '学生答卷', to: `/exams/${numericExamId}/submissions` } : null}
+      />
       <SectionCard
-        title={exam ? `${exam.title}批量结果` : '批量结果'}
-        description="查看全班批改进度，复核需要人工确认的答卷，并导出成绩。"
+        title={exam ? `${exam.title} 批改与导出` : '批改与导出'}
+        description="查看全班批改进度，复核需要人工确认的答卷，并导出成绩与评分说明。"
         action={
           <div className="flex flex-wrap gap-2">
             <button
@@ -171,10 +193,11 @@ export function BatchResultsPage() {
           </div>
         }
       >
-        <div className="grid gap-4 md:grid-cols-6">
+        <div className="grid gap-4 md:grid-cols-7">
           <Metric label="答卷数" value={String(data?.rows.length ?? 0)} />
           <Metric label="已评分" value={String(gradedCount)} />
           <Metric label="待复核答卷" value={String(reviewCount)} />
+          <Metric label="已终审" value={String(teacherFinalizedCount)} />
           <Metric label="AI 复审题" value={String(aiReviewedCount)} />
           <Metric label="待复核题" value={String(pendingAnswerReviewCount)} />
           <Metric label="失败" value={String(failedCount)} />
@@ -207,6 +230,7 @@ export function BatchResultsPage() {
                   <th className="px-5 py-4">学生</th>
                   <th className="px-5 py-4">状态</th>
                   <th className="px-5 py-4">总分</th>
+                  <th className="px-5 py-4">终审</th>
                   {data.questions.map((question) => (
                     <th key={question.id} className="px-5 py-4">
                       {question.question_no}
@@ -231,6 +255,9 @@ export function BatchResultsPage() {
                       <StatusBadge status={row.status} />
                     </td>
                     <td className="px-5 py-4 font-semibold text-ink-950">{formatScore(row.total_score)}</td>
+                    <td className="px-5 py-4">
+                      <TeacherFinalizedBadge finalized={row.teacher_finalized} />
+                    </td>
                     {data.questions.map((question) => {
                       const score = row.question_scores[question.question_no]
                       return (
@@ -291,6 +318,18 @@ function Metric({ label, value }: { label: string; value: string }) {
       <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-ink-700">{label}</div>
       <div className="mt-2 font-display text-3xl text-ink-950">{value}</div>
     </div>
+  )
+}
+
+function TeacherFinalizedBadge({ finalized }: { finalized: boolean }) {
+  return finalized ? (
+    <span className="rounded-full bg-sage-100 px-3 py-1 text-xs font-semibold text-sage-500 ring-1 ring-inset ring-sage-200">
+      已终审
+    </span>
+  ) : (
+    <span className="rounded-full bg-paper px-3 py-1 text-xs font-semibold text-ink-700 ring-1 ring-inset ring-ink-900/10">
+      未终审
+    </span>
   )
 }
 

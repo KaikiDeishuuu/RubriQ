@@ -87,6 +87,31 @@ def test_override_score_without_reviewed_keeps_review_flag(client_session) -> No
     assert answer.teacher_comment == "manual score"
 
 
+def test_mark_answer_reviewed_records_teacher_review_decision(client_session) -> None:
+    test_client, session = client_session
+    _submission, answers = _create_submission_with_answers(session)
+    answer = answers[0]
+
+    response = test_client.put(f"/api/answers/{answer.id}/override", json={"reviewed": True})
+
+    assert response.status_code == 200
+    session.refresh(answer)
+    assert answer.review_decision == "teacher_reviewed"
+
+
+def test_override_rejects_answer_while_ai_review_in_progress(client_session) -> None:
+    test_client, session = client_session
+    _submission, answers = _create_submission_with_answers(session)
+    answer = answers[0]
+    answer.review_decision = "in_progress"
+    session.commit()
+
+    response = test_client.put(f"/api/answers/{answer.id}/override", json={"reviewed": True})
+
+    assert response.status_code == 409
+    assert "AI 复审" in response.json()["detail"]
+
+
 def _create_submission_with_answers(session, *, first_needs_review: bool = True) -> tuple[Submission, list[Answer]]:
     exam = Exam(title="Sample")
     session.add(exam)

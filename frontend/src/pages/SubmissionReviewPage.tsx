@@ -12,6 +12,7 @@ import {
   overrideAnswer,
   processSubmission,
   updateDeductionSummary,
+  updateSubmissionTeacherFinalized,
 } from '../lib/api'
 import { confidenceTone, formatConfidence, formatScore, isSubmissionActive, toClassNames } from '../lib/format'
 import type { Answer, ConfidenceLevel, SubmissionDetail, SubmissionStatus } from '../lib/types'
@@ -29,6 +30,7 @@ export function SubmissionReviewPage() {
   const [exportingPdf, setExportingPdf] = useState(false)
   const [savingOverride, setSavingOverride] = useState(false)
   const [savingReviewFlag, setSavingReviewFlag] = useState(false)
+  const [savingTeacherFinalized, setSavingTeacherFinalized] = useState(false)
   const [deductionDraft, setDeductionDraft] = useState<string>('')
   const [savingDeduction, setSavingDeduction] = useState(false)
   const loadingRef = useRef(false)
@@ -40,14 +42,14 @@ export function SubmissionReviewPage() {
   }, [numericSubmissionId])
 
   useEffect(() => {
-    if (!submission || !isSubmissionActive(submission.status)) {
+    if (!submission || (!isSubmissionActive(submission.status) && !submission.answers.some((answer) => answer.review_decision === 'in_progress'))) {
       return
     }
     const timerId = window.setInterval(() => {
       void loadSubmission({ background: true })
     }, 3000)
     return () => window.clearInterval(timerId)
-  }, [submission?.status])
+  }, [submission?.status, submission?.answers])
 
   useEffect(() => {
     manualQuestionSelectionRef.current = false
@@ -152,6 +154,22 @@ export function SubmissionReviewPage() {
     }
   }
 
+  async function handleTeacherFinalized() {
+    if (!submission) {
+      return
+    }
+    setSavingTeacherFinalized(true)
+    try {
+      const updated = await updateSubmissionTeacherFinalized(submission.id, { teacher_finalized: !submission.teacher_finalized })
+      setSubmission(updated)
+      setDeductionDraft(updated.deduction_summary ?? '')
+    } catch (error) {
+      setError(error instanceof Error ? error.message : '保存整卷终审标记失败')
+    } finally {
+      setSavingTeacherFinalized(false)
+    }
+  }
+
   async function handleOverride(event: FormEvent<HTMLFormElement>, answer: Answer) {
     event.preventDefault()
     setSavingOverride(true)
@@ -192,6 +210,7 @@ export function SubmissionReviewPage() {
   const activeQuestion =
     submission?.exam.questions.find((question) => question.id === selectedQuestionId) ?? submission?.exam.questions[0] ?? null
   const activeAnswer = activeQuestion ? answerByQuestion.get(activeQuestion.id) ?? null : null
+  const activeAnswerReviewing = activeAnswer?.review_decision === 'in_progress'
   const completedQuestionCount = submission?.answers.length ?? 0
   const totalQuestionCount = submission?.exam.questions.length ?? 0
   const reviewedQuestionCount = submission?.answers.filter((answer) => !answer.needs_human_review).length ?? 0
@@ -227,6 +246,19 @@ export function SubmissionReviewPage() {
             </Link>
             <button
               type="button"
+              onClick={() => void handleTeacherFinalized()}
+              disabled={savingTeacherFinalized || !submission}
+              className={toClassNames(
+                'rounded-full px-4 py-2 text-sm font-semibold transition disabled:opacity-50',
+                submission?.teacher_finalized
+                  ? 'border border-sage-200 bg-sage-50 text-sage-500 hover:bg-sage-100'
+                  : 'border border-gold-200 bg-gold-50 text-amber-800 hover:bg-gold-100',
+              )}
+            >
+              {savingTeacherFinalized ? '正在保存...' : submission?.teacher_finalized ? '取消终审标记' : '标记整卷已终审'}
+            </button>
+            <button
+              type="button"
               onClick={() => void handleExportPdf()}
               disabled={exportingPdf || !submission || submissionIsActive}
               className="rounded-full border border-ink-900/10 bg-white px-4 py-2 text-sm font-semibold text-ink-950 transition hover:bg-paper disabled:opacity-50"
@@ -244,12 +276,13 @@ export function SubmissionReviewPage() {
           </div>
         }
       >
-        <div className="grid gap-4 md:grid-cols-4 xl:grid-cols-7">
+        <div className="grid gap-4 md:grid-cols-4 xl:grid-cols-8">
           <Metric label="学生" value={submission?.student_name || '未知'} />
           <Metric label="学号" value={submission?.student_id || '待识别'} />
           <Metric label="总分" value={formatScore(submission?.total_score ?? 0)} />
           <Metric label="复核进度" value={`${reviewedQuestionCount}/${completedQuestionCount || totalQuestionCount}`} />
           <Metric label="待复核" value={String(pendingReviewQuestionCount)} />
+          <Metric label="整卷终审" value={submission?.teacher_finalized ? '已终审' : '未标记'} />
           <Metric label="来源" value={submission?.source_mode ? formatSourceMode(submission.source_mode) : '单份上传'} />
           <div className="rounded-2xl border border-ink-900/10 bg-white px-4 py-4 shadow-sm">
             <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-ink-700">状态</div>
@@ -458,6 +491,9 @@ export function SubmissionReviewPage() {
 
                     <div className="rounded-2xl border border-ink-900/10 bg-white p-5">
                       <form key={activeAnswer.id} className="space-y-4" onSubmit={(event) => void handleOverride(event, activeAnswer)}>
+                        {activeAnswerReviewing ? (
+                          <Message message="AI 正在复审本题，完成前暂不能人工改分或确认复核；页面会自动刷新。" tone="warning" />
+                        ) : null}
                         <label className="block space-y-2">
                           <span className="text-sm font-semibold text-ink-800">老师改分</span>
                           <input
@@ -467,7 +503,8 @@ export function SubmissionReviewPage() {
                             step="0.1"
                             min="0"
                             max={activeAnswer.max_score}
-                            className="w-full rounded-2xl border border-ink-900/10 bg-paper px-4 py-3 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
+                            disabled={activeAnswerReviewing}
+                            className="w-full rounded-2xl border border-ink-900/10 bg-paper px-4 py-3 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100 disabled:opacity-50"
                           />
                         </label>
                         <label className="block space-y-2">
@@ -477,13 +514,14 @@ export function SubmissionReviewPage() {
                             rows={4}
                             defaultValue={activeAnswer.teacher_comment ?? ''}
                             placeholder="说明改分原因，或确认 AI 评分无误。"
-                            className="w-full rounded-2xl border border-ink-900/10 bg-paper px-4 py-3 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
+                            disabled={activeAnswerReviewing}
+                            className="w-full rounded-2xl border border-ink-900/10 bg-paper px-4 py-3 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100 disabled:opacity-50"
                           />
                         </label>
                         <div className="flex flex-wrap gap-2">
                           <button
                             type="submit"
-                            disabled={savingOverride}
+                            disabled={savingOverride || activeAnswerReviewing}
                             className="rounded-full bg-ink-950 px-5 py-3 text-sm font-semibold text-paper transition hover:bg-ink-800 disabled:opacity-50"
                           >
                             {savingOverride ? '正在保存...' : '保存改分'}
@@ -491,7 +529,7 @@ export function SubmissionReviewPage() {
                           <button
                             type="button"
                             onClick={() => void handleReviewFlag(activeAnswer, true)}
-                            disabled={savingReviewFlag || !activeAnswer.needs_human_review}
+                            disabled={savingReviewFlag || activeAnswerReviewing || !activeAnswer.needs_human_review}
                             className="rounded-full border border-sage-200 bg-sage-50 px-5 py-3 text-sm font-semibold text-sage-400 transition hover:bg-sage-100 disabled:opacity-50"
                           >
                             {savingReviewFlag ? '正在保存...' : '确认本题已复核'}
@@ -499,7 +537,7 @@ export function SubmissionReviewPage() {
                           <button
                             type="button"
                             onClick={() => void handleReviewFlag(activeAnswer, false)}
-                            disabled={savingReviewFlag || activeAnswer.needs_human_review}
+                            disabled={savingReviewFlag || activeAnswerReviewing || activeAnswer.needs_human_review}
                             className="rounded-full border border-gold-200 bg-gold-50 px-5 py-3 text-sm font-semibold text-amber-800 transition hover:bg-gold-100 disabled:opacity-50"
                           >
                             重新标记需复核
@@ -816,14 +854,14 @@ function InfoTile({ label, value, tone }: { label: string; value: string; tone?:
   )
 }
 
-function Message({ message, tone = 'neutral' }: { message: string; tone?: 'neutral' | 'error' }) {
+function Message({ message, tone = 'neutral' }: { message: string; tone?: 'neutral' | 'error' | 'warning' }) {
+  const toneClass = tone === 'error'
+    ? 'border-red-200 bg-red-50 text-red-700'
+    : tone === 'warning'
+      ? 'border-gold-200 bg-gold-50 text-amber-800'
+      : 'border-ink-900/10 bg-white/80 text-ink-700'
   return (
-    <div
-      className={toClassNames(
-        'rounded-2xl border px-4 py-3 text-sm',
-        tone === 'error' ? 'border-red-200 bg-red-50 text-red-700' : 'border-ink-900/10 bg-white/80 text-ink-700',
-      )}
-    >
+    <div className={toClassNames('rounded-2xl border px-4 py-3 text-sm', toneClass)}>
       {message}
     </div>
   )

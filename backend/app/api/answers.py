@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_db
 from app.models import Answer
 from app.schemas.submission import AnswerDetail, SubmissionOverride
-from app.services.pipeline import PipelineError, apply_teacher_override
+from app.services.pipeline import PipelineConflictError, PipelineError, apply_teacher_override
 
 router = APIRouter(prefix="/answers", tags=["answers"])
 
@@ -28,6 +28,8 @@ def override_answer_score(
             update_teacher_override_score="teacher_override_score" in fields_set,
             update_teacher_comment="teacher_comment" in fields_set,
         )
+    except PipelineConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except PipelineError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return _serialize_answer(answer)

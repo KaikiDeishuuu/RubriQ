@@ -310,33 +310,72 @@ def confirm_batch_split(session: Session, batch_id: int) -> BatchConfirmResult:
 
 
 def start_batch_grading(session: Session, batch_id: int) -> tuple[SubmissionBatch, int]:
-    from app.workers.tasks import process_submission_task
-
     batch = load_batch_detail(session, batch_id)
     if batch.status not in {BatchStatus.ready_for_grading.value, BatchStatus.completed_with_errors.value}:
         raise BatchPipelineError("Batch split must be confirmed before grading")
     _ensure_exam_has_gradable_questions(session, batch.exam_id)
+    _ensure_exam_roster_confirmed(session, batch.exam_id)
+    queued_count = _dispatch_next_batch_chunk(session, batch, eligible_statuses=STARTABLE_SUBMISSION_STATUSES)
+    if queued_count > 0:
+        batch.status = BatchStatus.grading.value
+        session.commit()
+    else:
+        refresh_batch_grading_status(session, batch.id)
+    return load_batch_detail(session, batch.id), queued_count
+
+
+def _dispatch_next_batch_chunk(
+    session: Session,
+    batch: SubmissionBatch,
+    *,
+    eligible_statuses: set[str] | None = None,
+) -> int:
+    """Queue up to settings.ai_grading_batch_size pending submissions for this batch.
+
+    Returns the number of submissions newly queued. Older chunks must finish before
+    a new chunk starts; callers should invoke this when the previous chunk is done.
+
+    `eligible_statuses` defaults to {uploaded} for the auto-redispatch loop so that
+    failed submissions are not retried indefinitely. Pass STARTABLE_SUBMISSION_STATUSES
+    explicitly for user-triggered start to retry previously failed ones once.
+    """
+
+    from app.workers.tasks import process_submission_task
+
+    statuses = eligible_statuses if eligible_statuses is not None else {SubmissionStatus.uploaded.value}
+    pending = [
+        submission
+        for submission in batch.submissions
+        if submission.split_confirmed and submission.status in statuses
+    ]
+    if not pending:
+        return 0
+    chunk_size = max(1, settings.ai_grading_batch_size)
+    chunk = sorted(pending, key=lambda submission: submission.id)[:chunk_size]
     queued_submission_ids: list[int] = []
-    for submission in batch.submissions:
-        if not submission.split_confirmed:
-            continue
-        if submission.status not in STARTABLE_SUBMISSION_STATUSES:
-            continue
+    for submission in chunk:
         claimed = session.execute(
             sa_update(Submission)
-            .where(Submission.id == submission.id, Submission.status.in_(STARTABLE_SUBMISSION_STATUSES))
+            .where(Submission.id == submission.id, Submission.status.in_(statuses))
             .values(status=SubmissionStatus.processing.value, error_message=None)
         ).rowcount
         if claimed:
             queued_submission_ids.append(submission.id)
     if queued_submission_ids:
-        batch.status = BatchStatus.grading.value
         session.commit()
         for submission_id in queued_submission_ids:
             process_submission_task.delay(submission_id)
-    else:
-        refresh_batch_grading_status(session, batch.id)
-    return load_batch_detail(session, batch.id), len(queued_submission_ids)
+    return len(queued_submission_ids)
+
+
+def _ensure_exam_roster_confirmed(session: Session, exam_id: int) -> None:
+    exam = session.get(Exam, exam_id)
+    if exam is None:
+        raise BatchPipelineError(f"Exam {exam_id} not found")
+    if exam.roster_status != "confirmed":
+        raise BatchPipelineError(
+            "考试名单尚未确认，请先在「考试名单」步骤上传并确认名单后再开始批改。"
+        )
 
 
 def _ensure_exam_has_gradable_questions(session: Session, exam_id: int) -> None:
@@ -356,19 +395,31 @@ def refresh_batch_grading_status(session: Session, batch_id: int) -> SubmissionB
         return batch
     if any(submission.status in ACTIVE_SUBMISSION_STATUSES for submission in submissions):
         next_status = BatchStatus.grading.value
-    elif any(submission.status == SubmissionStatus.failed.value for submission in submissions):
-        next_status = BatchStatus.completed_with_errors.value
-    elif all(submission.status in COMPLETED_SUBMISSION_STATUSES for submission in submissions):
-        if _queue_batch_review_if_needed(session, batch):
-            next_status = BatchStatus.grading.value
-        elif batch.ai_review_status == "failed":
-            next_status = BatchStatus.completed_with_errors.value
-        elif batch.ai_review_status == "queued" or batch.ai_review_status == "running":
-            next_status = BatchStatus.grading.value
-        else:
-            next_status = BatchStatus.completed.value
     else:
-        next_status = batch.status
+        # Current chunk finished. If more pending submissions exist, dispatch the next chunk
+        # to keep grading drift bounded per chunk and reduce AI hallucination risk.
+        # Auto-loop only retries `uploaded` submissions; failed ones are left for explicit retry.
+        pending_remaining = any(
+            submission.status == SubmissionStatus.uploaded.value for submission in submissions
+        )
+        if batch.status == BatchStatus.grading.value and pending_remaining:
+            queued = _dispatch_next_batch_chunk(session, batch)
+            if queued > 0:
+                # Stay in grading state; new tasks will trigger another refresh on completion.
+                return load_batch_detail(session, batch.id)
+        if any(submission.status == SubmissionStatus.failed.value for submission in submissions):
+            next_status = BatchStatus.completed_with_errors.value
+        elif all(submission.status in COMPLETED_SUBMISSION_STATUSES for submission in submissions):
+            if _queue_batch_review_if_needed(session, batch):
+                next_status = BatchStatus.grading.value
+            elif batch.ai_review_status == "failed":
+                next_status = BatchStatus.completed_with_errors.value
+            elif batch.ai_review_status == "queued" or batch.ai_review_status == "running":
+                next_status = BatchStatus.grading.value
+            else:
+                next_status = BatchStatus.completed.value
+        else:
+            next_status = batch.status
     if batch.status != next_status:
         batch.status = next_status
         session.commit()
@@ -439,11 +490,18 @@ def _batch_variance_review_answer_ids(session: Session, batch_id: int) -> list[i
         max_score = max((answer.max_score for answer in question_answers), default=0)
         if max_score <= 0:
             continue
+        reviewable_answers = [
+            answer
+            for answer in question_answers
+            if answer.review_score is None
+            and answer.teacher_override_score is None
+            and answer.review_decision != "teacher_reviewed"
+        ]
         scores = [answer.fast_score if answer.fast_score is not None else answer.score for answer in question_answers]
         score_range = max(scores) - min(scores)
         if score_range <= _to_decimal(float(max_score) * settings.ai_grading_review_variance_range_ratio):
             continue
-        review_answer_ids.extend(answer.id for answer in question_answers if answer.review_score is None)
+        review_answer_ids.extend(answer.id for answer in reviewable_answers)
     return review_answer_ids
 
 

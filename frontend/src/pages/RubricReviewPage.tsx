@@ -1,15 +1,17 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import { DropZone } from '../components/DropZone'
+import { ExamWizardSteps, WizardNav, emptyWizardStatus } from '../components/ExamWizard'
 import { SectionCard } from '../components/SectionCard'
-import { buildStorageUrl, createRubricItem, deleteRubricItem, getExam, parseRubricPdf, updateQuestion, updateRubricItem, uploadRubricPdf } from '../lib/api'
+import { buildStorageUrl, confirmRubric, createRubricItem, deleteRubricItem, getExam, parseRubricPdf, reopenRubric, updateQuestion, updateRubricItem, uploadRubricPdf } from '../lib/api'
 import { formatScore, toClassNames } from '../lib/format'
 import type { ExamDetail, Question, RubricItem } from '../lib/types'
 
 export function RubricReviewPage() {
 	const { examId } = useParams()
 	const numericExamId = Number(examId)
+	const navigate = useNavigate()
 	const [exam, setExam] = useState<ExamDetail | null>(null)
 	const [loading, setLoading] = useState(true)
 	const [error, setError] = useState<string | null>(null)
@@ -17,6 +19,7 @@ export function RubricReviewPage() {
 	const [selectedFile, setSelectedFile] = useState<File | null>(null)
 	const [busy, setBusy] = useState(false)
 	const [parsing, setParsing] = useState(false)
+	const [confirming, setConfirming] = useState(false)
 
 	useEffect(() => {
 		void loadExam()
@@ -77,6 +80,43 @@ export function RubricReviewPage() {
 		} finally {
 			setParsing(false)
 			setBusy(false)
+		}
+	}
+
+	async function handleConfirmRubric(advance: boolean) {
+		if (!Number.isFinite(numericExamId)) {
+			return
+		}
+		setConfirming(true)
+		setError(null)
+		try {
+			const updated = await confirmRubric(numericExamId)
+			setExam(updated)
+			setFeedback('评分标准已确认。')
+			if (advance) {
+				navigate(`/exams/${numericExamId}/roster`)
+			}
+		} catch (error) {
+			setError(error instanceof Error ? error.message : '确认评分标准失败')
+		} finally {
+			setConfirming(false)
+		}
+	}
+
+	async function handleReopenRubric() {
+		if (!Number.isFinite(numericExamId)) {
+			return
+		}
+		setConfirming(true)
+		setError(null)
+		try {
+			const updated = await reopenRubric(numericExamId)
+			setExam(updated)
+			setFeedback('已重新打开评分标准，可以继续编辑。')
+		} catch (error) {
+			setError(error instanceof Error ? error.message : '重新打开评分标准失败')
+		} finally {
+			setConfirming(false)
 		}
 	}
 
@@ -167,30 +207,40 @@ export function RubricReviewPage() {
 
 	return (
 		<div className="space-y-6">
+			<ExamWizardSteps
+				current="rubric"
+				examId={Number.isFinite(numericExamId) ? numericExamId : null}
+				status={{
+					...emptyWizardStatus(),
+					rubricDone: Boolean(exam && !exam.needs_rubric_review && exam.questions.length > 0),
+					rosterDone: Boolean(exam && exam.roster_status === 'confirmed'),
+				}}
+			/>
+			<WizardNav
+				examId={Number.isFinite(numericExamId) ? numericExamId : null}
+				prev={{ label: '考试列表', to: '/exams' }}
+				next={Number.isFinite(numericExamId) ? {
+					label: '考试名单',
+					to: `/exams/${numericExamId}/roster`,
+					disabledReason: exam && !exam.needs_rubric_review && exam.questions.length > 0
+						? null
+						: '请先在下方点击「确认并进入下一步」',
+				} : null}
+			/>
 			<SectionCard
 				title={exam ? `${exam.title} 评分标准复核` : '评分标准复核'}
-				description="上传标准答案或评分标准 PDF，解析成结构化题目和评分项后再人工确认。"
+				description="第 2 步：上传 PDF → AI 解析 → 检查每道题与评分项 → 确认。确认后才能进入下一步「考试名单」。"
 				action={
-					<div className="flex flex-wrap gap-2">
-						<Link
-							to={Number.isFinite(numericExamId) ? `/exams/${numericExamId}/roster` : '/exams'}
-							className="rounded-full border border-ink-900/10 bg-white px-4 py-2 text-sm font-semibold text-ink-950 transition hover:bg-paper"
-						>
-							考试名单
-						</Link>
-						<Link
-							to={Number.isFinite(numericExamId) ? `/exams/${numericExamId}/submissions` : '/exams'}
-							className="rounded-full border border-ink-900/10 bg-white px-4 py-2 text-sm font-semibold text-ink-950 transition hover:bg-paper"
-						>
-							学生答卷
-						</Link>
-						<Link
-							to={Number.isFinite(numericExamId) ? `/exams/${numericExamId}/results` : '/exams'}
-							className="rounded-full border border-slateBlue-200 bg-slateBlue-50 px-4 py-2 text-sm font-semibold text-slateBlue-500 transition hover:bg-slateBlue-100"
-						>
-							批量结果
-						</Link>
-					</div>
+					<span
+						className={toClassNames(
+							'inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold ring-1 ring-inset',
+							exam && !exam.needs_rubric_review
+								? 'bg-sage-100 text-sage-500 ring-sage-200'
+								: 'bg-gold-50 text-amber-800 ring-gold-200',
+						)}
+					>
+						{exam && !exam.needs_rubric_review ? '已确认' : '待确认'}
+					</span>
 				}
 			>
 				<div className="grid gap-4 md:grid-cols-3">
@@ -273,6 +323,59 @@ export function RubricReviewPage() {
 						</div>
 					)}
 				</SectionCard>
+
+				<SectionCard
+					title="确认评分标准"
+					description="所有题目和评分项都已检查无误后，点击「确认并进入下一步」。确认后才能继续上传考试名单。"
+					className="xl:col-span-2"
+				>
+					<div className="flex flex-wrap items-center gap-3">
+						{exam && !exam.needs_rubric_review ? (
+							<>
+								<span className="inline-flex items-center rounded-full bg-sage-100 px-3 py-1 text-xs font-semibold text-sage-500 ring-1 ring-inset ring-sage-200">
+									评分标准已确认
+								</span>
+								<button
+									type="button"
+									onClick={() => navigate(Number.isFinite(numericExamId) ? `/exams/${numericExamId}/roster` : '/exams')}
+									className="rounded-full bg-ink-950 px-5 py-3 text-sm font-semibold text-paper transition hover:bg-ink-800"
+								>
+									进入下一步：考试名单
+								</button>
+								<button
+									type="button"
+									onClick={() => void handleReopenRubric()}
+									disabled={confirming || busy}
+									className="rounded-full border border-ink-900/10 bg-white px-5 py-3 text-sm font-semibold text-ink-950 transition hover:bg-paper disabled:opacity-50"
+								>
+									重新打开编辑
+								</button>
+							</>
+						) : (
+							<>
+								<button
+									type="button"
+									onClick={() => void handleConfirmRubric(true)}
+									disabled={confirming || busy || parsing || !exam || exam.questions.length === 0}
+									className="rounded-full bg-ink-950 px-5 py-3 text-sm font-semibold text-paper transition hover:bg-ink-800 disabled:opacity-50"
+								>
+									{confirming ? '正在确认...' : '确认并进入下一步'}
+								</button>
+								<button
+									type="button"
+									onClick={() => void handleConfirmRubric(false)}
+									disabled={confirming || busy || parsing || !exam || exam.questions.length === 0}
+									className="rounded-full border border-ink-900/10 bg-white px-5 py-3 text-sm font-semibold text-ink-950 transition hover:bg-paper disabled:opacity-50"
+								>
+									仅确认，不跳转
+								</button>
+								{!exam || exam.questions.length === 0 ? (
+									<span className="text-xs text-ink-700">提示：至少要有一道已解析的题目才能确认。</span>
+								) : null}
+							</>
+						)}
+					</div>
+				</SectionCard>
 			</div>
 		</div>
 	)
@@ -303,7 +406,7 @@ function QuestionEditorCard({
 			>
 				<div className="flex flex-wrap items-center justify-between gap-3">
 					<div>
-						<h3 className="font-display text-3xl text-ink-950">题目{question.question_no}</h3>
+						<h3 className="font-display text-3xl text-ink-950">题目 {question.question_no}</h3>
 						<p className="mt-1 text-sm text-ink-700">编辑题目和评分项，后续评分证据会按这些规则追溯。</p>
 					</div>
 					<span className="rounded-full bg-slateBlue-50 px-3 py-1 text-xs font-semibold text-slateBlue-500 ring-1 ring-inset ring-slateBlue-100">
@@ -311,8 +414,8 @@ function QuestionEditorCard({
 					</span>
 				</div>
 
-				<div className="grid gap-3 md:grid-cols-[1.1fr_2fr_0.6fr_0.6fr_auto]">
-					<label className="block space-y-2">
+				<div className="grid gap-3 lg:grid-cols-12">
+					<label className="block space-y-2 lg:col-span-2">
 						<span className="text-xs font-semibold uppercase tracking-[0.18em] text-ink-700">题号</span>
 						<input
 							name="question_no"
@@ -320,7 +423,7 @@ function QuestionEditorCard({
 							className="w-full rounded-2xl border border-ink-900/10 bg-white px-3 py-2 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
 						/>
 					</label>
-					<label className="block space-y-2">
+					<label className="block space-y-2 lg:col-span-10">
 						<span className="text-xs font-semibold uppercase tracking-[0.18em] text-ink-700">题目标题</span>
 						<input
 							name="title"
@@ -328,7 +431,7 @@ function QuestionEditorCard({
 							className="w-full rounded-2xl border border-ink-900/10 bg-white px-3 py-2 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
 						/>
 					</label>
-					<label className="block space-y-2">
+					<label className="block space-y-2 lg:col-span-2">
 						<span className="text-xs font-semibold uppercase tracking-[0.18em] text-ink-700">满分</span>
 						<input
 							name="max_score"
@@ -338,7 +441,7 @@ function QuestionEditorCard({
 							className="w-full rounded-2xl border border-ink-900/10 bg-white px-3 py-2 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
 						/>
 					</label>
-					<label className="block space-y-2">
+					<label className="block space-y-2 lg:col-span-2">
 						<span className="text-xs font-semibold uppercase tracking-[0.18em] text-ink-700">排序</span>
 						<input
 							name="order_index"
@@ -347,13 +450,13 @@ function QuestionEditorCard({
 							className="w-full rounded-2xl border border-ink-900/10 bg-white px-3 py-2 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
 						/>
 					</label>
-					<div className="flex items-end">
+					<div className="flex items-end justify-end lg:col-span-8">
 						<button
 							type="submit"
 							disabled={disabled}
-							className="rounded-full bg-ink-950 px-4 py-2 text-sm font-semibold text-paper transition hover:bg-ink-800 disabled:cursor-not-allowed disabled:opacity-50"
+							className="rounded-full bg-ink-950 px-5 py-2 text-sm font-semibold text-paper transition hover:bg-ink-800 disabled:cursor-not-allowed disabled:opacity-50"
 						>
-							保存
+							保存题目设置
 						</button>
 					</div>
 				</div>
@@ -363,56 +466,50 @@ function QuestionEditorCard({
 				{question.rubric_items.map((item) => (
 					<form
 						key={item.id}
-						className="grid gap-3 rounded-2xl border border-ink-900/10 bg-paper p-4 md:grid-cols-[2fr_0.55fr_1fr_0.45fr_auto_auto]"
+						className="space-y-3 rounded-2xl border border-ink-900/10 bg-paper p-4"
 						onSubmit={async (event) => {
 							await onSaveRubricItem(question.id, item, event)
 						}}
 					>
-						<label className="block space-y-2 md:col-span-1">
+						<label className="block space-y-2">
 							<span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-700">评分说明</span>
-							<input
+							<textarea
 								name="description"
 								defaultValue={item.description}
-								className="w-full rounded-2xl border border-ink-900/10 bg-white px-3 py-2 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
+								rows={2}
+								className="w-full resize-y rounded-2xl border border-ink-900/10 bg-white px-3 py-2 leading-6 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
 							/>
 						</label>
-						<label className="block space-y-2">
-							<span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-700">分值</span>
-							<input
-								name="max_score"
-								type="number"
-								step="0.1"
-								defaultValue={String(item.max_score)}
-								className="w-full rounded-2xl border border-ink-900/10 bg-white px-3 py-2 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
-							/>
-						</label>
-						<label className="block space-y-2 md:col-span-1">
-							<span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-700">关键词</span>
-							<input
-								name="keywords"
-								defaultValue={item.keywords.join(', ')}
-								className="w-full rounded-2xl border border-ink-900/10 bg-white px-3 py-2 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
-							/>
-						</label>
-						<label className="block space-y-2">
-							<span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-700">排序</span>
-							<input
-								name="order_index"
-								type="number"
-								defaultValue={String(item.order_index)}
-								className="w-full rounded-2xl border border-ink-900/10 bg-white px-3 py-2 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
-							/>
-						</label>
-						<div className="flex items-end">
-							<button
-								type="submit"
-								disabled={disabled}
-								className="rounded-full bg-slateBlue-400 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slateBlue-500 disabled:cursor-not-allowed disabled:opacity-50"
-							>
-								保存
-							</button>
+						<div className="grid gap-3 lg:grid-cols-12">
+							<label className="block space-y-2 lg:col-span-2">
+								<span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-700">分值</span>
+								<input
+									name="max_score"
+									type="number"
+									step="0.1"
+									defaultValue={String(item.max_score)}
+									className="w-full rounded-2xl border border-ink-900/10 bg-white px-3 py-2 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
+								/>
+							</label>
+							<label className="block space-y-2 lg:col-span-7">
+								<span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-700">关键词（逗号分隔）</span>
+								<input
+									name="keywords"
+									defaultValue={item.keywords.join(', ')}
+									className="w-full rounded-2xl border border-ink-900/10 bg-white px-3 py-2 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
+								/>
+							</label>
+							<label className="block space-y-2 lg:col-span-3">
+								<span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-700">排序</span>
+								<input
+									name="order_index"
+									type="number"
+									defaultValue={String(item.order_index)}
+									className="w-full rounded-2xl border border-ink-900/10 bg-white px-3 py-2 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
+								/>
+							</label>
 						</div>
-						<div className="flex items-end">
+						<div className="flex flex-wrap justify-end gap-2">
 							<button
 								type="button"
 								disabled={disabled}
@@ -423,57 +520,67 @@ function QuestionEditorCard({
 							>
 								删除
 							</button>
+							<button
+								type="submit"
+								disabled={disabled}
+								className="rounded-full bg-slateBlue-400 px-5 py-2 text-sm font-semibold text-white transition hover:bg-slateBlue-500 disabled:cursor-not-allowed disabled:opacity-50"
+							>
+								保存评分项
+							</button>
 						</div>
 					</form>
 				))}
 			</div>
 
 			<form
-				className="mt-5 grid gap-3 rounded-2xl border border-dashed border-ink-900/15 bg-white p-4 md:grid-cols-[2fr_0.55fr_1fr_0.45fr_auto]"
+				className="mt-5 space-y-3 rounded-2xl border border-dashed border-ink-900/15 bg-white p-4"
 				onSubmit={async (event) => {
 					await onCreateRubricItem(question.id, event)
 				}}
 			>
 				<label className="block space-y-2">
-					<span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-700">新增评分项</span>
-					<input
+					<span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-700">新增评分项 · 评分说明</span>
+					<textarea
 						name="description"
 						placeholder="例如：写出关键公式或核心依据"
-						className="w-full rounded-2xl border border-ink-900/10 bg-white px-3 py-2 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
+						rows={2}
+						className="w-full resize-y rounded-2xl border border-ink-900/10 bg-white px-3 py-2 leading-6 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
 					/>
 				</label>
-				<label className="block space-y-2">
-					<span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-700">分值</span>
-					<input
-						name="max_score"
-						type="number"
-						step="0.1"
-						defaultValue="1"
-						className="w-full rounded-2xl border border-ink-900/10 bg-white px-3 py-2 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
-					/>
-				</label>
-				<label className="block space-y-2 md:col-span-1">
-					<span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-700">关键词</span>
-					<input
-						name="keywords"
-						placeholder="关键词1, 关键词2"
-						className="w-full rounded-2xl border border-ink-900/10 bg-white px-3 py-2 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
-					/>
-				</label>
-				<label className="block space-y-2">
-					<span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-700">排序</span>
-					<input
-						name="order_index"
-						type="number"
-						defaultValue={String(question.rubric_items.length)}
-						className="w-full rounded-2xl border border-ink-900/10 bg-white px-3 py-2 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
-					/>
-				</label>
-				<div className="flex items-end">
+				<div className="grid gap-3 lg:grid-cols-12">
+					<label className="block space-y-2 lg:col-span-2">
+						<span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-700">分值</span>
+						<input
+							name="max_score"
+							type="number"
+							step="0.1"
+							defaultValue="1"
+							className="w-full rounded-2xl border border-ink-900/10 bg-white px-3 py-2 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
+						/>
+					</label>
+					<label className="block space-y-2 lg:col-span-7">
+						<span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-700">关键词（逗号分隔）</span>
+						<input
+							name="keywords"
+							placeholder="关键词1, 关键词2"
+							className="w-full rounded-2xl border border-ink-900/10 bg-white px-3 py-2 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
+						/>
+					</label>
+					<label className="block space-y-2 lg:col-span-3">
+						<span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-700">排序</span>
+						<input
+							name="order_index"
+							type="number"
+							defaultValue={String(question.rubric_items.length)}
+							className="w-full rounded-2xl border border-ink-900/10 bg-white px-3 py-2 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
+						/>
+					</label>
+				</div>
+				<div className="flex justify-end">
 					<button
 						type="submit"
 						disabled={disabled}
-						className="rounded-full bg-ink-950 px-4 py-2 text-sm font-semibold text-paper transition hover:bg-ink-800 disabled:cursor-not-allowed disabled:opacity-50"
+						className="rounded-full bg-ink-950 px-5 py-2 text-sm font-semibold text-paper transition hover:bg-ink-800 disabled:cursor-not-allowed disabled:opacity-50"
 					>
 						添加评分项
 					</button>

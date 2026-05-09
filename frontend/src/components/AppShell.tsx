@@ -31,11 +31,16 @@ export function AppShell() {
           <div className="flex h-full flex-col gap-8 overflow-y-auto">
             <div>
               <div className="inline-flex items-center rounded-full border border-gold-200/30 bg-white/5 px-3 py-1 text-[11px] uppercase tracking-[0.28em] text-gold-100">
-                智能阅卷工作台
+                Studio
               </div>
-              <h1 className="mt-4 font-display text-4xl leading-none text-white">QuizOCR</h1>
+              <h1 className="mt-4 font-display text-4xl leading-none text-white">
+                RubriQ <span className="text-gold-100">·</span> Studio
+              </h1>
+              <p className="mt-2 text-xs uppercase tracking-[0.24em] text-slate-400">
+                OCR-powered rubric grading workspace
+              </p>
               <p className="mt-4 max-w-sm text-sm leading-6 text-slate-300">
-                面向手写和中英混合试卷的 AI 预评分系统，评分依据可追溯到每条评分标准和证据。
+                面向手写与中英混合试卷的 AI 评分平台：rubric 追溯、名单交叉校验、分批批改、复核可审计。
               </p>
             </div>
             <nav className="sticky top-4 z-10 space-y-2 rounded-3xl bg-ink-950/95 py-2 backdrop-blur">
@@ -43,6 +48,7 @@ export function AppShell() {
                 <NavLink
                   key={item.to}
                   to={item.to}
+                  end={item.to === '/exams'}
                   className={({ isActive }) =>
                     toClassNames(
                       'block rounded-2xl px-4 py-3 text-sm font-semibold transition',
@@ -56,10 +62,20 @@ export function AppShell() {
                 </NavLink>
               ))}
             </nav>
+            <div className="rounded-2xl border border-white/10 bg-white/5 p-4 text-xs leading-6 text-slate-300">
+              <p className="font-semibold text-white">推荐流程</p>
+              <ol className="mt-2 list-decimal space-y-1 pl-4">
+                <li>创建考试</li>
+                <li>上传并确认评分标准</li>
+                <li>上传并确认考试名单</li>
+                <li>上传学生答卷与拆分</li>
+                <li>分批批改、复核、导出</li>
+              </ol>
+            </div>
             <div className="mt-auto rounded-2xl border border-white/10 bg-white/5 p-4 text-sm leading-6 text-slate-300">
               <p className="font-semibold text-white">人工复核优先</p>
               <p className="mt-2">
-                每个分数都保留评分标准、证据片段和人工改分记录，方便老师复查。
+                每个分数都保留 rubric 证据与教师改分痕迹，扣分摘要可编辑后再导出 PDF。
               </p>
             </div>
           </div>

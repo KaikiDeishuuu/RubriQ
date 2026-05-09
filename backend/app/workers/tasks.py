@@ -76,7 +76,7 @@ def start_batch_grading_task(batch_id: int) -> dict[str, int | str]:
         session.close()
 
 
-@celery_app.task(name="app.workers.tasks.review_batch_grading_task")
+@celery_app.task(name="app.workers.tasks.review_batch_grading_task", soft_time_limit=1800, time_limit=2400)
 def review_batch_grading_task(batch_id: int) -> dict[str, int | str]:
     session = SessionLocal()
     try:

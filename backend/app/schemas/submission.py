@@ -32,6 +32,7 @@ class SubmissionSummary(BaseSchema):
     split_confirmed: bool = False
     deduction_summary: str | None = None
     deduction_summary_edited: bool = False
+    teacher_finalized: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -109,6 +110,10 @@ class SubmissionOverride(BaseSchema):
 class DeductionSummaryUpdate(BaseSchema):
     summary: str | None = None
     reset: bool = False
+
+
+class TeacherFinalizedUpdate(BaseSchema):
+    teacher_finalized: bool
 
 
 class SubmissionUploadResponse(BaseSchema):

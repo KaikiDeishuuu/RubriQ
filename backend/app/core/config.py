@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     ai_grading_strictness: str = Field(default="moderate", alias="AI_GRADING_STRICTNESS")
     ai_grading_concurrency: int = Field(default=4, alias="AI_GRADING_CONCURRENCY")
     ai_grading_global_concurrency: int = Field(default=4, alias="AI_GRADING_GLOBAL_CONCURRENCY")
+    ai_grading_batch_size: int = Field(default=5, alias="AI_GRADING_BATCH_SIZE")
     ai_vision_chain: str | None = Field(default=None, alias="AI_VISION_CHAIN")
     ai_vision_rubric_chain: str | None = Field(default=None, alias="AI_VISION_RUBRIC_CHAIN")
     ai_vision_student_extraction_chain: str | None = Field(default=None, alias="AI_VISION_STUDENT_EXTRACTION_CHAIN")
@@ -100,6 +101,13 @@ class Settings(BaseSettings):
     def _validate_grading_global_concurrency(cls, value: int) -> int:
         if value < 1 or value > 8:
             raise ValueError("AI_GRADING_GLOBAL_CONCURRENCY must be between 1 and 8")
+        return value
+
+    @field_validator("ai_grading_batch_size")
+    @classmethod
+    def _validate_grading_batch_size(cls, value: int) -> int:
+        if value < 1 or value > 200:
+            raise ValueError("AI_GRADING_BATCH_SIZE must be between 1 and 200")
         return value
 
     @field_validator("ai_grading_review_score_delta_ratio", "ai_grading_review_variance_range_ratio")

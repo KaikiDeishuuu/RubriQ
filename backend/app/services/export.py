@@ -57,6 +57,7 @@ def build_exam_results_data(session: Session, exam_id: int) -> dict[str, Any]:
                 "source_mode": submission.source_mode,
                 "split_confidence": submission.split_confidence,
                 "split_confirmed": submission.split_confirmed,
+                "teacher_finalized": submission.teacher_finalized,
                 "question_scores": row_question_scores,
                 "created_at": submission.created_at,
                 "updated_at": submission.updated_at,
@@ -369,10 +370,46 @@ def _resolve_deduction_summary(submission: Submission) -> str:
     return generate_deduction_summary(submission)
 
 
+_PDF_UNSUPPORTED_CHAR_REPLACEMENTS = {
+    "•": "*",   # • bullet → STSong-Light has no glyph
+    "—": "-",   # — em dash
+    "–": "-",   # – en dash
+    "·": ".",   # · middle dot
+    "→": "->",  # → right arrow
+    " ": " ",   # nbsp
+}
+
+
+def _sanitize_for_stsong_light(text: str) -> str:
+    for source, target in _PDF_UNSUPPORTED_CHAR_REPLACEMENTS.items():
+        if source in text:
+            text = text.replace(source, target)
+    return text
+
+
 def _build_deduction_summary_block(text: str, styles: dict[str, ParagraphStyle]) -> Table:
-    safe_html = escape(text).replace("\n", "<br/>")
-    paragraph = Paragraph(safe_html, styles["cell"])
-    table = Table([[paragraph]], colWidths=[A4[0] - 32 * mm])
+    sanitized = _sanitize_for_stsong_light(text)
+    base_style = styles["cell"]
+    line_style = ParagraphStyle(
+        "DeductionLine",
+        parent=base_style,
+        leading=12,
+        spaceAfter=2,
+    )
+    indented_line_style = ParagraphStyle(
+        "DeductionLineIndent",
+        parent=line_style,
+        leftIndent=14,
+    )
+    flowables: list[Any] = []
+    for raw_line in sanitized.split("\n"):
+        if not raw_line.strip():
+            flowables.append(Spacer(1, 4))
+            continue
+        leading_spaces = len(raw_line) - len(raw_line.lstrip(" "))
+        style = indented_line_style if leading_spaces > 0 else line_style
+        flowables.append(Paragraph(escape(raw_line.strip()), style))
+    table = Table([[flowables]], colWidths=[A4[0] - 32 * mm])
     table.setStyle(
         TableStyle(
             [

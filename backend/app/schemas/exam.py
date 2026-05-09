@@ -162,6 +162,7 @@ class ExamResultRow(BaseSchema):
     source_mode: str | None = None
     split_confidence: float | None = None
     split_confirmed: bool = False
+    teacher_finalized: bool = False
     question_scores: dict[str, float] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime

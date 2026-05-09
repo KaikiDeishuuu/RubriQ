@@ -120,6 +120,24 @@ def parse_rubric(
     return serialize_exam_detail(exam)
 
 
+@router.post("/{exam_id}/rubric/confirm", response_model=ExamDetail)
+def confirm_rubric(exam_id: int, session: Session = Depends(get_db)):
+    exam = _load_exam_or_404(session, exam_id)
+    if not exam.questions:
+        raise HTTPException(status_code=400, detail="请先解析评分标准并至少保留一道题再确认")
+    exam.needs_rubric_review = False
+    session.commit()
+    return serialize_exam_detail(load_exam_detail(session, exam_id))
+
+
+@router.post("/{exam_id}/rubric/reopen", response_model=ExamDetail)
+def reopen_rubric(exam_id: int, session: Session = Depends(get_db)):
+    exam = _load_exam_or_404(session, exam_id)
+    exam.needs_rubric_review = True
+    session.commit()
+    return serialize_exam_detail(load_exam_detail(session, exam_id))
+
+
 @router.get("/{exam_id}/questions", response_model=list[QuestionRead])
 def list_questions(exam_id: int, session: Session = Depends(get_db)):
     exam = _load_exam_or_404(session, exam_id)
@@ -157,7 +175,9 @@ def create_rubric_item(
         order_index=payload.order_index,
     )
     session.add(rubric_item)
-    recalculate_question_and_exam_totals(session, question_id)
+    # Rubric item changes do NOT auto-update question.max_score or exam.total_score —
+    # the AI-parsed/teacher-entered question max is authoritative. Recalculating
+    # would overwrite question max with sum(rubric_items), which can drift up or down.
     session.commit()
     return serialize_question(load_question_detail(session, question_id))
 
@@ -177,7 +197,7 @@ def update_rubric_item(
         rubric_item.keywords = payload.keywords
     if payload.order_index is not None:
         rubric_item.order_index = payload.order_index
-    recalculate_question_and_exam_totals(session, rubric_item.question_id)
+    # Same as create: do NOT touch question.max_score / exam.total_score from rubric items.
     session.commit()
     return serialize_question(load_question_detail(session, rubric_item.question_id))
 
@@ -187,7 +207,6 @@ def delete_rubric_item(item_id: int, session: Session = Depends(get_db)):
     rubric_item = _load_rubric_item_or_404(session, item_id)
     question_id = rubric_item.question_id
     session.delete(rubric_item)
-    recalculate_question_and_exam_totals(session, question_id)
     session.commit()
     return {"message": "Rubric item deleted"}
 
@@ -276,10 +295,18 @@ def export_exam_results_pdf(exam_id: int, session: Session = Depends(get_db)):
 
 @router.get("/{exam_id}/export-submissions.zip")
 def export_exam_submissions_zip(exam_id: int, session: Session = Depends(get_db)):
-    _load_exam_or_404(session, exam_id)
+    exam = _load_exam_or_404(session, exam_id)
     zip_bytes, total, failure_count = build_exam_submissions_zip(session, exam_id)
+    from urllib.parse import quote
+
+    safe_title = (exam.title or f"exam-{exam_id}").strip() or f"exam-{exam_id}"
+    ascii_fallback = f"exam-{exam_id}-submissions.zip"
+    quoted_filename = quote(f"{safe_title}-评分说明.zip", safe="")
     headers = {
-        "Content-Disposition": f'attachment; filename="exam-{exam_id}-submissions.zip"',
+        "Content-Disposition": (
+            f'attachment; filename="{ascii_fallback}"; '
+            f"filename*=UTF-8''{quoted_filename}"
+        ),
         "X-Submission-Total": str(total),
         "X-Submission-Failures": str(failure_count),
     }

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from io import BytesIO
 from types import SimpleNamespace
 from typing import Any
+
+from openpyxl import load_workbook
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -64,6 +67,41 @@ def test_chunk_questions_splits_long_result_tables() -> None:
         ["9", "10", "11", "12", "13", "14", "15", "16"],
         ["17"],
     ]
+
+
+def test_teacher_finalized_is_not_exported_in_results_files(monkeypatch) -> None:
+    def fake_results_data(_session: Any, exam_id: int) -> dict[str, Any]:
+        return {
+            "exam": SimpleNamespace(id=exam_id, title="Sample Exam"),
+            "questions": [SimpleNamespace(question_no="1", max_score=5)],
+            "ai_review_active": False,
+            "ai_review_statuses": [],
+            "rows": [
+                {
+                    "submission_id": 1,
+                    "student_name": "Alice",
+                    "student_id": "S001",
+                    "status": "graded",
+                    "total_score": 5.0,
+                    "needs_human_review": False,
+                    "teacher_finalized": True,
+                    "question_scores": {"1": 5.0},
+                }
+            ],
+        }
+
+    monkeypatch.setattr(export, "build_exam_results_data", fake_results_data)
+
+    csv_text = export.build_exam_results_csv(None, 1)
+    workbook = load_workbook(BytesIO(export.build_exam_results_xlsx(None, 1)))
+    xlsx_headers = [cell.value for cell in next(workbook.active.iter_rows(min_row=1, max_row=1))]
+
+    assert "teacher_finalized" not in csv_text
+    assert "终审" not in csv_text
+    assert "平衡" not in csv_text
+    assert "teacher_finalized" not in xlsx_headers
+    assert "终审" not in xlsx_headers
+    assert "平衡" not in xlsx_headers
 
 
 

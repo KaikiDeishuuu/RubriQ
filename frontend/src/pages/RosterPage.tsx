@@ -2,17 +2,19 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
 import { DropZone } from '../components/DropZone'
+import { ExamWizardSteps, WizardNav, emptyWizardStatus } from '../components/ExamWizard'
 import { SectionCard } from '../components/SectionCard'
 import {
   confirmRoster,
   deleteRoster,
+  getExam,
   getRoster,
   parseRoster,
   putRoster,
   uploadRoster,
 } from '../lib/api'
 import { toClassNames } from '../lib/format'
-import type { RosterDetail, RosterEntry, RosterStatus } from '../lib/types'
+import type { ExamDetail, RosterDetail, RosterEntry, RosterStatus } from '../lib/types'
 
 interface DraftEntry {
   student_name: string
@@ -37,6 +39,7 @@ export function RosterPage() {
   const { examId } = useParams()
   const numericExamId = Number(examId)
 
+  const [exam, setExam] = useState<ExamDetail | null>(null)
   const [roster, setRoster] = useState<RosterDetail | null>(null)
   const [drafts, setDrafts] = useState<DraftEntry[]>([])
   const [loading, setLoading] = useState(true)
@@ -64,8 +67,9 @@ export function RosterPage() {
     setLoading(true)
     setError(null)
     try {
-      const detail = await getRoster(numericExamId)
-      setRoster(detail)
+      const [examDetail, rosterDetail] = await Promise.all([getExam(numericExamId), getRoster(numericExamId)])
+      setExam(examDetail)
+      setRoster(rosterDetail)
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载名单失败')
     } finally {
@@ -170,14 +174,33 @@ export function RosterPage() {
   }
 
   const status = roster?.roster_status ?? 'not_uploaded'
+  const rubricDone = Boolean(exam && !exam.needs_rubric_review && exam.questions.length > 0)
   const dirty = useMemo(() => roster ? !areDraftsEqual(drafts, rosterToDrafts(roster.entries)) : false, [drafts, roster])
   const filledDraftCount = drafts.filter((draft) => draft.student_name.trim() || draft.student_id.trim()).length
 
   return (
     <div className="space-y-6">
+      <ExamWizardSteps
+        current="roster"
+        examId={Number.isFinite(numericExamId) ? numericExamId : null}
+        status={{
+          ...emptyWizardStatus(),
+          rubricDone,
+          rosterDone: status === 'confirmed',
+        }}
+      />
+      <WizardNav
+        examId={Number.isFinite(numericExamId) ? numericExamId : null}
+        prev={Number.isFinite(numericExamId) ? { label: '评分标准', to: `/exams/${numericExamId}/rubric` } : null}
+        next={Number.isFinite(numericExamId) ? {
+          label: '学生答卷',
+          to: `/exams/${numericExamId}/submissions`,
+          disabledReason: !rubricDone ? '请先确认评分标准' : status === 'confirmed' ? null : '请先确认名单',
+        } : null}
+      />
       <SectionCard
         title="考试名单"
-        description="上传后名单可用于拆分预览自动绑定与身份交叉校验，建议在上传学生答卷前先确认名单。"
+        description="上传后名单可用于拆分预览自动绑定与身份交叉校验，必须在「学生答卷」步骤前确认。"
         action={
           <Link
             to={Number.isFinite(numericExamId) ? `/exams/${numericExamId}/rubric` : '/exams'}

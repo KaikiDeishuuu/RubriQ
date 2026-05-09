@@ -25,6 +25,7 @@ import type {
   SubmissionOverridePayload,
   SubmissionSummary,
   SubmissionUploadResponse,
+  TeacherFinalizedUpdatePayload,
 } from './types'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000/api'
@@ -89,6 +90,14 @@ export async function parseRubricPdf(examId: number, examFileId?: number): Promi
   return request<ExamDetail>(`/exams/${examId}/rubric/parse${suffix}`, {
     method: 'POST',
   })
+}
+
+export async function confirmRubric(examId: number): Promise<ExamDetail> {
+  return request<ExamDetail>(`/exams/${examId}/rubric/confirm`, { method: 'POST' })
+}
+
+export async function reopenRubric(examId: number): Promise<ExamDetail> {
+  return request<ExamDetail>(`/exams/${examId}/rubric/reopen`, { method: 'POST' })
 }
 
 export async function getQuestions(examId: number): Promise<Question[]> {
@@ -274,6 +283,19 @@ export async function updateDeductionSummary(
   payload: DeductionSummaryUpdatePayload,
 ): Promise<SubmissionDetail> {
   return request<SubmissionDetail>(`/submissions/${submissionId}/deduction-summary`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function updateSubmissionTeacherFinalized(
+  submissionId: number,
+  payload: TeacherFinalizedUpdatePayload,
+): Promise<SubmissionDetail> {
+  return request<SubmissionDetail>(`/submissions/${submissionId}/teacher-finalized`, {
     method: 'PUT',
     headers: {
       'Content-Type': 'application/json',

@@ -10,7 +10,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.core.config import settings
 from app.db.base import Base
-from app.models import BatchStatus, BatchUploadMode, Exam, Question, RosterEntry, Submission, SubmissionBatch, SubmissionStatus
+from app.models import Answer, BatchStatus, BatchUploadMode, Exam, Question, RosterEntry, Submission, SubmissionBatch, SubmissionStatus
 from app.schemas.batch import BatchCandidateUpdate
 from app.services import batch_pipeline
 from app.services.batch_pipeline import (
@@ -605,7 +605,7 @@ def test_start_batch_grading_refreshes_status_when_no_submissions_are_queued(ses
 
 
 def _create_exam(session) -> Exam:
-    exam = Exam(title="Sample")
+    exam = Exam(title="Sample", roster_status="confirmed")
     session.add(exam)
     session.flush()
     session.add(Question(exam_id=exam.id, question_no="1", title="Question 1"))
@@ -795,3 +795,100 @@ def _fake_completion(student_name: str | None, student_id: str | None, confidenc
         overall_confidence=confidence,
     )
     return SimpleNamespace(data=data, raw_text=data.model_dump_json())
+
+
+def test_start_batch_grading_dispatches_chunks(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(batch_pipeline.settings, "ai_grading_batch_size", 2)
+    exam = _create_exam(session)
+    batch = SubmissionBatch(
+        exam_id=exam.id,
+        mode=BatchUploadMode.zip.value,
+        status=BatchStatus.ready_for_grading.value,
+        source_filename="batch.zip",
+        source_storage_path="batch.zip",
+    )
+    session.add(batch)
+    session.flush()
+    submissions = [
+        _create_submission(session, exam.id, batch.id, SubmissionStatus.uploaded.value)
+        for _ in range(5)
+    ]
+    session.commit()
+    queued_ids: list[int] = []
+    monkeypatch.setattr("app.workers.tasks.process_submission_task.delay", queued_ids.append)
+
+    updated_batch, queued_count = start_batch_grading(session, batch.id)
+
+    assert queued_count == 2
+    assert len(queued_ids) == 2
+    assert queued_ids == sorted(s.id for s in submissions)[:2]
+    assert updated_batch.status == BatchStatus.grading.value
+
+    # First chunk completes; refresh should dispatch the next chunk
+    for sid in queued_ids:
+        sub = session.get(Submission, sid)
+        sub.status = SubmissionStatus.graded.value
+    session.commit()
+
+    refresh_batch_grading_status(session, batch.id)
+
+    assert len(queued_ids) == 4  # second chunk dispatched
+    assert queued_ids[2:] == sorted(s.id for s in submissions)[2:4]
+
+
+def test_start_batch_grading_requires_confirmed_roster(session) -> None:
+    exam = _create_exam(session)
+    exam.roster_status = "needs_review"
+    session.commit()
+    batch = SubmissionBatch(
+        exam_id=exam.id,
+        mode=BatchUploadMode.zip.value,
+        status=BatchStatus.ready_for_grading.value,
+        source_filename="batch.zip",
+        source_storage_path="batch.zip",
+    )
+    session.add(batch)
+    session.commit()
+
+    with pytest.raises(BatchPipelineError, match="考试名单"):
+        start_batch_grading(session, batch.id)
+
+
+def test_batch_variance_review_skips_teacher_reviewed_answers(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(batch_pipeline.settings, "ai_grading_review_variance_min_answers", 2)
+    monkeypatch.setattr(batch_pipeline.settings, "ai_grading_review_variance_range_ratio", 0.1)
+    exam = _create_exam(session)
+    question = exam.questions[0]
+    question.max_score = 10
+    batch = SubmissionBatch(
+        exam_id=exam.id,
+        mode=BatchUploadMode.zip.value,
+        status=BatchStatus.completed.value,
+        source_filename="batch.zip",
+        source_storage_path="batch.zip",
+    )
+    session.add(batch)
+    session.flush()
+    reviewed_submission = _create_submission(session, exam.id, batch.id, SubmissionStatus.graded.value)
+    pending_submission = _create_submission(session, exam.id, batch.id, SubmissionStatus.graded.value)
+    reviewed_answer = Answer(
+        submission_id=reviewed_submission.id,
+        question_id=question.id,
+        extracted_answer="reviewed",
+        score=10,
+        max_score=10,
+        review_decision="teacher_reviewed",
+    )
+    pending_answer = Answer(
+        submission_id=pending_submission.id,
+        question_id=question.id,
+        extracted_answer="pending",
+        score=0,
+        max_score=10,
+    )
+    session.add_all([reviewed_answer, pending_answer])
+    session.commit()
+
+    answer_ids = batch_pipeline._batch_variance_review_answer_ids(session, batch.id)
+
+    assert answer_ids == [pending_answer.id]

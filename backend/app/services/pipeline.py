@@ -40,6 +40,10 @@ class PipelineError(RuntimeError):
     pass
 
 
+class PipelineConflictError(PipelineError):
+    pass
+
+
 @dataclass(slots=True)
 class RubricItemSnapshot:
     id: int
@@ -441,6 +445,8 @@ def apply_teacher_override(
     answer = session.get(Answer, answer_id)
     if answer is None:
         raise PipelineError(f"Answer {answer_id} not found")
+    if answer.review_decision == "in_progress":
+        raise PipelineConflictError("AI 复审正在进行中，请等待复审完成后再操作。")
     if update_teacher_override_score:
         answer.teacher_override_score = (
             _to_decimal(teacher_override_score) if teacher_override_score is not None else None
@@ -449,8 +455,10 @@ def apply_teacher_override(
         answer.teacher_comment = teacher_comment
     if reviewed is True:
         answer.needs_human_review = False
+        answer.review_decision = "teacher_reviewed"
     elif reviewed is False:
         answer.needs_human_review = True
+        answer.review_decision = "needs_teacher_review"
     session.flush()
     _recalculate_submission_total(session, answer.submission_id)
     refresh_deduction_summary(session, answer.submission_id)
@@ -908,11 +916,21 @@ def review_answer_with_strong_model(
         answer.review_triggers = triggers
         session.commit()
         return answer
+    if answer.teacher_override_score is not None or answer.review_decision == "teacher_reviewed":
+        answer.review_triggers = triggers
+        session.commit()
+        return answer
     claimed = session.execute(
         sa_update(Answer)
-        .where(Answer.id == answer_id, Answer.review_score.is_(None))
+        .where(
+            Answer.id == answer_id,
+            Answer.review_score.is_(None),
+            Answer.teacher_override_score.is_(None),
+            Answer.review_decision != "teacher_reviewed",
+        )
         .values(review_decision="in_progress")
     ).rowcount
+    session.commit()
     if not claimed:
         session.refresh(answer)
         return answer
@@ -929,6 +947,12 @@ def review_answer_with_strong_model(
             extraction_confidence=ConfidenceLevel(answer.confidence),
             route_key="grading_review",
         )
+    session.refresh(answer)
+    if answer.teacher_override_score is not None or answer.review_decision == "teacher_reviewed":
+        answer.review_triggers = triggers
+        session.commit()
+        return answer
+
     answer.review_triggers = triggers
     if review_attempt is None:
         answer.review_decision = "failed"
@@ -1041,16 +1065,30 @@ def _extract_submission_answers(
 
 
 def _scored_questions_only(questions: list[ExtractedQuestion]) -> list[ExtractedQuestion]:
-    question_numbers = {question.question_no.strip() for question in questions}
+    questions_by_no = {question.question_no.strip(): question for question in questions}
     scored_questions: list[ExtractedQuestion] = []
     for question in questions:
         question_no = question.question_no.strip()
-        has_child_questions = any(
-            other_no != question_no and other_no.startswith(f"{question_no}.")
-            for other_no in question_numbers
-        )
-        if has_child_questions and not question.rubric_items:
-            continue
+        children = [
+            other for other_no, other in questions_by_no.items()
+            if other_no != question_no and other_no.startswith(f"{question_no}.")
+        ]
+        if children:
+            try:
+                child_total = sum(float(child.max_score) for child in children)
+            except (TypeError, ValueError):
+                child_total = 0.0
+            try:
+                parent_total = float(question.max_score)
+            except (TypeError, ValueError):
+                parent_total = 0.0
+            # Drop the parent whenever children carry the score so totals don't double-count.
+            # Tolerance covers AI rounding (e.g. 19 vs 18.5).
+            if child_total + 0.5 >= parent_total:
+                continue
+            # Also drop when parent has no rubric items of its own — preserves prior behaviour.
+            if not question.rubric_items:
+                continue
         scored_questions.append(question)
     return scored_questions
 
@@ -1180,11 +1218,11 @@ def generate_deduction_summary(submission: Submission) -> str:
             description = (rubric_item.description.strip() if rubric_item else f"评分项 #{rubric_result.rubric_item_id}")
             reason = (rubric_result.reason or "").strip() or "未给出说明，请人工复核"
             bullet_lines.append(
-                f"  • {description}：扣 {_format_score_value(lost)} 分 —— {reason}"
+                f"  评分项「{description}」扣 {_format_score_value(lost)} 分。原因：{reason}"
             )
         if not bullet_lines:
             fallback_reason = (answer.ai_comment or "").strip() or "AI 未输出具体扣分依据，请人工复核"
-            bullet_lines.append(f"  • {fallback_reason}")
+            bullet_lines.append(f"  {fallback_reason}")
         blocks.append("\n".join([header, *bullet_lines]))
     if not blocks:
         return "本卷没有扣分项，全部题目得满分。"

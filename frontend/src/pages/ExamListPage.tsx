@@ -57,7 +57,7 @@ export function ExamListPage() {
     <div className="space-y-6">
       <SectionCard
         title="考试列表"
-        description="创建考试、上传评分标准 PDF，然后在人工复核流程中处理学生答卷。"
+        description="按 5 步推进：创建考试 → 评分标准 → 考试名单 → 学生答卷 → 批改与导出。每一步都可以回到上一步修改。"
         action={
           <Link
             to="/exams/new"
@@ -69,8 +69,8 @@ export function ExamListPage() {
       >
         <div className="grid gap-4 md:grid-cols-3">
           <Metric label="考试数量" value={String(exams.length)} />
-          <Metric label="评分方式" value="按评分标准可追溯评分" />
-          <Metric label="导出" value="CSV / Excel / PDF" />
+          <Metric label="评分方式" value="rubric 证据可追溯" />
+          <Metric label="导出" value="CSV / Excel / PDF / ZIP" />
         </div>
       </SectionCard>
 

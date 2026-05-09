@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
 import { DropZone } from '../components/DropZone'
+import { ExamWizardSteps, WizardNav, emptyWizardStatus } from '../components/ExamWizard'
 import { PreviewPanel } from '../components/PreviewPanel'
 import { SectionCard } from '../components/SectionCard'
 import { StatusBadge } from '../components/StatusBadge'
@@ -298,11 +299,47 @@ export function SubmissionUploadPage() {
   const batchPages = activeBatch?.pages.map((page) => ({ label: `Page ${page.page_no}`, url: buildStorageUrl(page.image_path) })) ?? []
   const activeCandidateDrafts = useMemo(() => candidateDrafts.filter((candidate) => !candidate.excluded), [candidateDrafts])
   const validationError = useMemo(() => validateCandidateDrafts(candidateDrafts, activeBatch?.total_pages ?? null), [candidateDrafts, activeBatch?.total_pages])
+  const rubricDone = Boolean(exam && !exam.needs_rubric_review && exam.questions.length > 0)
+  const rosterDone = Boolean(exam && exam.roster_status === 'confirmed')
+  const batchReadyForGrading = activeBatch?.status === 'ready_for_grading' || activeBatch?.status === 'completed_with_errors'
+  const batchGradingDisabledReason = !rubricDone ? '请先确认评分标准' : !rosterDone ? '请先确认名单' : batchReadyForGrading ? null : '请先确认拆分'
   const canConfirmSplit = Boolean(activeBatch && activeCandidateDrafts.length > 0 && !validationError && activeCandidateDrafts.every((candidate) => candidate.confirmed && candidate.student_name && candidate.student_id))
-  const canStartBatchGrading = Boolean(activeBatch?.status === 'ready_for_grading' || activeBatch?.status === 'completed_with_errors')
+  const canStartBatchGrading = Boolean(activeBatch && !batchGradingDisabledReason)
 
   return (
     <div className="space-y-6">
+      <ExamWizardSteps
+        current="submissions"
+        examId={Number.isFinite(numericExamId) ? numericExamId : null}
+        status={{
+          ...emptyWizardStatus(),
+          rubricDone,
+          rosterDone,
+          submissionsReady: (results?.rows.length ?? 0) > 0,
+          hasResults: (results?.rows.filter((row) => row.status === 'graded' || row.status === 'needs_review').length ?? 0) > 0,
+        }}
+      />
+      <WizardNav
+        examId={Number.isFinite(numericExamId) ? numericExamId : null}
+        prev={Number.isFinite(numericExamId) ? { label: '考试名单', to: `/exams/${numericExamId}/roster` } : null}
+        next={Number.isFinite(numericExamId) ? {
+          label: '批改与导出',
+          to: `/exams/${numericExamId}/results`,
+          disabledReason: (results?.rows.length ?? 0) > 0 ? null : '请先上传答卷',
+        } : null}
+      />
+      {!rubricDone ? (
+        <InlineMessage
+          tone="error"
+          message="尚未确认评分标准。请先返回「评分标准」步骤确认后，再启动 AI 批改。"
+        />
+      ) : null}
+      {exam && !rosterDone ? (
+        <InlineMessage
+          tone="error"
+          message="尚未确认考试名单。请先返回上一步「考试名单」上传并确认；未确认时无法启动批量 AI 批改。"
+        />
+      ) : null}
       <SectionCard
         title={exam ? `${exam.title}的学生答卷` : '上传学生答卷'}
         description="上传学生 PDF、ZIP 批次或合并 PDF；合并文件必须先拆分确认，才能进入 AI 批改。"
@@ -409,6 +446,9 @@ export function SubmissionUploadPage() {
                 {activeBatch.status !== 'ready_for_grading' && activeBatch.status !== 'grading' ? (
                   <InlineMessage message="未完成拆分确认，不能开始 AI 评分。请确认每个候选页段和学生信息。" tone="warning" />
                 ) : null}
+                {batchGradingDisabledReason && batchReadyForGrading ? (
+                  <InlineMessage message={`暂不能开始批量批改：${batchGradingDisabledReason}。`} tone="warning" />
+                ) : null}
                 {batchPages.length > 0 ? (
                   <PreviewPanel
                     title="页面预览"
@@ -449,6 +489,7 @@ export function SubmissionUploadPage() {
                     type="button"
                     onClick={() => void handleStartBatchGrading()}
                     disabled={batchBusy || !canStartBatchGrading}
+                    title={batchGradingDisabledReason ?? undefined}
                     className="rounded-full border border-slateBlue-200 bg-slateBlue-50 px-5 py-3 text-sm font-semibold text-slateBlue-500 transition hover:bg-slateBlue-100 disabled:opacity-50"
                   >
                     开始批改本批次
@@ -472,6 +513,7 @@ export function SubmissionUploadPage() {
                   <th className="px-4 py-3">学生</th>
                   <th className="px-4 py-3">状态</th>
                   <th className="px-4 py-3">分数</th>
+                  <th className="px-4 py-3">终审</th>
                   <th className="px-4 py-3">复核</th>
                 </tr>
               </thead>
@@ -486,6 +528,9 @@ export function SubmissionUploadPage() {
                       <StatusBadge status={row.status} />
                     </td>
                     <td className="px-4 py-4 font-semibold text-ink-950">{formatScore(row.total_score)}</td>
+                    <td className="px-4 py-4">
+                      <TeacherFinalizedBadge finalized={row.teacher_finalized} />
+                    </td>
                     <td className="px-4 py-4">
                       <div className="flex flex-wrap gap-2">
                         <button
@@ -735,6 +780,18 @@ function ProcessingWorkflow() {
       </div>
       <div className="mt-3 text-xs text-ink-700">页面会每 3 秒自动刷新。</div>
     </div>
+  )
+}
+
+function TeacherFinalizedBadge({ finalized }: { finalized: boolean }) {
+  return finalized ? (
+    <span className="rounded-full bg-sage-100 px-3 py-1 text-xs font-semibold text-sage-500 ring-1 ring-inset ring-sage-200">
+      已终审
+    </span>
+  ) : (
+    <span className="rounded-full bg-paper px-3 py-1 text-xs font-semibold text-ink-700 ring-1 ring-inset ring-ink-900/10">
+      未终审
+    </span>
   )
 }
 

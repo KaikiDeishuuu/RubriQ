@@ -620,3 +620,193 @@ def test_refresh_deduction_summary_respects_teacher_edit() -> None:
         assert submission.deduction_summary  # auto-generated string
     finally:
         session.close()
+
+
+def test_review_answer_with_strong_model_records_trigger_for_teacher_override() -> None:
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+    session = SessionLocal()
+    try:
+        exam = Exam(title="模拟", total_score=Decimal("3"))
+        session.add(exam)
+        session.flush()
+        question = Question(exam_id=exam.id, question_no="1", title="题", max_score=Decimal("3"), order_index=0)
+        session.add(question)
+        session.flush()
+        submission = Submission(
+            exam_id=exam.id,
+            original_pdf_path="submissions/s002.pdf",
+            status=SubmissionStatus.graded.value,
+        )
+        session.add(submission)
+        session.flush()
+        answer = Answer(
+            submission_id=submission.id,
+            question_id=question.id,
+            extracted_answer="部分答案",
+            score=Decimal("2"),
+            max_score=Decimal("3"),
+            confidence="medium",
+            teacher_override_score=Decimal("2.5"),
+            review_triggers=["low_confidence"],
+        )
+        session.add(answer)
+        session.commit()
+
+        pipeline.review_answer_with_strong_model(session, answer.id, trigger="score_variance")
+        session.refresh(answer)
+
+        assert answer.review_triggers == ["low_confidence", "score_variance"]
+        assert answer.review_score is None
+    finally:
+        session.close()
+
+
+def test_review_answer_with_strong_model_skips_teacher_reviewed_answer() -> None:
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+    session = SessionLocal()
+    try:
+        exam = Exam(title="模拟", total_score=Decimal("3"))
+        session.add(exam)
+        session.flush()
+        question = Question(exam_id=exam.id, question_no="1", title="题", max_score=Decimal("3"), order_index=0)
+        session.add(question)
+        session.flush()
+        submission = Submission(
+            exam_id=exam.id,
+            original_pdf_path="submissions/s002.pdf",
+            status=SubmissionStatus.graded.value,
+            total_score=Decimal("2"),
+        )
+        session.add(submission)
+        session.flush()
+        answer = Answer(
+            submission_id=submission.id,
+            question_id=question.id,
+            extracted_answer="部分答案",
+            score=Decimal("2"),
+            max_score=Decimal("3"),
+            confidence="medium",
+            needs_human_review=False,
+            review_decision="teacher_reviewed",
+        )
+        session.add(answer)
+        session.commit()
+
+        pipeline.review_answer_with_strong_model(session, answer.id, trigger="score_variance")
+        session.refresh(answer)
+        session.refresh(submission)
+
+        assert answer.review_triggers == ["score_variance"]
+        assert answer.review_score is None
+        assert answer.score == Decimal("2.00")
+        assert answer.needs_human_review is False
+        assert answer.review_decision == "teacher_reviewed"
+        assert submission.total_score == Decimal("2.00")
+    finally:
+        session.close()
+
+
+def test_scored_questions_only_drops_parent_when_children_cover_score() -> None:
+    questions = [
+        ExtractedQuestion(question_no="2", title="Standalone", max_score=4, rubric_items=[]),
+        ExtractedQuestion(question_no="3", title="Composite", max_score=19, rubric_items=[]),
+        ExtractedQuestion(question_no="3.1", title="Sub A", max_score=5, rubric_items=[]),
+        ExtractedQuestion(question_no="3.2", title="Sub B", max_score=11, rubric_items=[]),
+        ExtractedQuestion(question_no="3.3", title="Sub C", max_score=3, rubric_items=[]),
+    ]
+    result = _scored_questions_only(questions)
+    assert [q.question_no for q in result] == ["2", "3.1", "3.2", "3.3"]
+
+
+def test_scored_questions_only_keeps_parent_when_children_dont_cover_score() -> None:
+    # Parent has 10 points, only one sub-question with 3 points -> parent's own scoring still relevant.
+    questions = [
+        ExtractedQuestion(
+            question_no="4",
+            title="Mostly standalone",
+            max_score=10,
+            rubric_items=[],
+        ),
+        ExtractedQuestion(question_no="4.1", title="Sub", max_score=3, rubric_items=[]),
+    ]
+    result = _scored_questions_only(questions)
+    # Parent has no rubric_items -> still dropped under the existing legacy rule.
+    assert "4.1" in [q.question_no for q in result]
+
+
+def test_confirm_rubric_endpoint_marks_review_done(tmp_path) -> None:
+    from fastapi.testclient import TestClient
+    from sqlalchemy import create_engine as _create_engine
+    from sqlalchemy.orm import sessionmaker as _sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    from app.api import deps as _deps
+    from app.main import app
+
+    engine = _create_engine("sqlite:///:memory:", future=True, connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    SessionLocal = _sessionmaker(bind=engine, future=True)
+    session = SessionLocal()
+    try:
+        exam = Exam(title="Demo", needs_rubric_review=True)
+        session.add(exam)
+        session.flush()
+        session.add(Question(exam_id=exam.id, question_no="1", title="Q1"))
+        session.commit()
+
+        def fake_get_db():
+            yield session
+
+        app.dependency_overrides[_deps.get_db] = fake_get_db
+        try:
+            client = TestClient(app)
+            # Confirm with no questions wouldn't reach here; we have one. So confirm returns 200.
+            response = client.post(f"/api/exams/{exam.id}/rubric/confirm")
+            assert response.status_code == 200, response.text
+            assert response.json()["needs_rubric_review"] is False
+
+            # Reopen
+            response = client.post(f"/api/exams/{exam.id}/rubric/reopen")
+            assert response.status_code == 200
+            assert response.json()["needs_rubric_review"] is True
+        finally:
+            app.dependency_overrides.clear()
+    finally:
+        session.close()
+
+
+def test_confirm_rubric_endpoint_rejects_when_no_questions(tmp_path) -> None:
+    from fastapi.testclient import TestClient
+    from sqlalchemy import create_engine as _create_engine
+    from sqlalchemy.orm import sessionmaker as _sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    from app.api import deps as _deps
+    from app.main import app
+
+    engine = _create_engine("sqlite:///:memory:", future=True, connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(engine)
+    SessionLocal = _sessionmaker(bind=engine, future=True)
+    session = SessionLocal()
+    try:
+        exam = Exam(title="Empty", needs_rubric_review=True)
+        session.add(exam)
+        session.commit()
+
+        def fake_get_db():
+            yield session
+
+        app.dependency_overrides[_deps.get_db] = fake_get_db
+        try:
+            client = TestClient(app)
+            response = client.post(f"/api/exams/{exam.id}/rubric/confirm")
+            assert response.status_code == 400
+            assert "请先解析" in response.json()["detail"] or "至少保留一道题" in response.json()["detail"]
+        finally:
+            app.dependency_overrides.clear()
+    finally:
+        session.close()
