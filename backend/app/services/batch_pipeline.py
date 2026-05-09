@@ -31,6 +31,12 @@ from app.services.llm import call_structured_json
 from app.services.ocr import HeaderOCRDiagnostic, extract_header_text_diagnostic, format_ocr_reference_text
 from app.services.pipeline import _to_decimal, review_answer_with_strong_model
 from app.services.pdf import crop_top_region, get_pdf_page_count, hash_file, render_pdf_to_images, split_pdf_pages
+from app.services.roster import (
+    RosterIndex,
+    RosterMatch,
+    build_roster_index,
+    match_roster_identity,
+)
 from app.storage.local import get_storage_service
 from app.utils.files import PDF_SIGNATURE, sanitize_filename
 
@@ -170,6 +176,16 @@ def update_batch_candidates(
     active_updates = [update for update in updates if not update.excluded]
     if active_updates:
         _validate_candidate_ranges(active_updates, batch.total_pages)
+    roster_index = build_roster_index(session, batch.exam_id)
+    seen_roster_entry_ids: set[int] = set()
+    for update in active_updates:
+        if update.roster_entry_id is None:
+            continue
+        if update.roster_entry_id in seen_roster_entry_ids:
+            raise BatchPipelineError("同一名单条目不能绑定到多个候选段")
+        seen_roster_entry_ids.add(update.roster_entry_id)
+        if update.roster_entry_id not in {entry.id for entry in roster_index.entries}:
+            raise BatchPipelineError("名单条目无效或不属于本考试")
     existing = {candidate.id: candidate for candidate in batch.candidates}
     for fallback_index, update in enumerate(updates, start=1):
         if update.id is not None and update.id in existing:
@@ -184,6 +200,19 @@ def update_batch_candidates(
         candidate.student_id = _clean_optional(update.student_id)
         candidate.review_notes = _clean_optional(update.review_notes)
         candidate.excluded = update.excluded
+        if update.roster_entry_id is not None:
+            roster_entry = next(
+                (entry for entry in roster_index.entries if entry.id == update.roster_entry_id),
+                None,
+            )
+            candidate.roster_entry_id = update.roster_entry_id
+            if roster_entry is not None:
+                if roster_entry.student_name:
+                    candidate.student_name = roster_entry.student_name
+                if roster_entry.student_id:
+                    candidate.student_id = roster_entry.student_id
+        else:
+            candidate.roster_entry_id = None
         candidate.confirmed = update.confirmed and not update.excluded
         candidate.needs_review = not candidate.confirmed or not candidate.student_name or not candidate.student_id
         if candidate.excluded:
@@ -207,6 +236,13 @@ def confirm_batch_split(session: Session, batch_id: int) -> BatchConfirmResult:
     invalid = [candidate for candidate in active_candidates if not candidate.student_name or not candidate.student_id]
     if invalid:
         raise BatchPipelineError("All confirmed split candidates must have student name and ID")
+    seen_roster_ids: set[int] = set()
+    for candidate in active_candidates:
+        if candidate.roster_entry_id is None:
+            continue
+        if candidate.roster_entry_id in seen_roster_ids:
+            raise BatchPipelineError("同一名单条目不能绑定到多个候选段，请检查后再确认")
+        seen_roster_ids.add(candidate.roster_entry_id)
 
     batch.status = BatchStatus.materializing.value
     session.commit()
@@ -422,6 +458,7 @@ def _prepare_zip_batch(session: Session, batch: SubmissionBatch) -> None:
     storage = get_storage_service()
     zip_path = storage.path_for(batch.source_storage_path)
     _clear_batch_children(session, batch.id, clear_submissions=True)
+    roster_index = build_roster_index(session, batch.exam_id)
     candidate_count = 0
     failed_count = 0
     with zipfile.ZipFile(zip_path) as archive:
@@ -444,7 +481,27 @@ def _prepare_zip_batch(session: Session, batch: SubmissionBatch) -> None:
                     data,
                 )
                 identity = parse_student_identity_from_filename(original_name)
-                needs_review = identity.confidence < 1.0 or not identity.student_id or not identity.student_name
+                roster_match = match_roster_identity(roster_index, identity.student_name, identity.student_id)
+                student_name = identity.student_name
+                student_id = identity.student_id
+                confidence = identity.confidence
+                roster_entry_id: int | None = None
+                review_notes: str | None = None
+                if roster_match.entry is not None:
+                    student_name = roster_match.entry.student_name or student_name
+                    student_id = roster_match.entry.student_id or student_id
+                    confidence = max(confidence, 0.95)
+                    roster_entry_id = roster_match.entry.id
+                elif not roster_index.is_empty():
+                    review_notes = "未在名单中找到匹配学生"
+                needs_review = (
+                    confidence < 1.0
+                    or not student_id
+                    or not student_name
+                    or (review_notes is not None)
+                )
+                if review_notes is None and needs_review:
+                    review_notes = "文件名无法可靠解析学生信息"
                 first_preview_page = _next_batch_page_no(session, batch.id)
                 pdf_page_count = get_pdf_page_count(stored.absolute_path)
                 candidate = BatchSplitCandidate(
@@ -452,14 +509,15 @@ def _prepare_zip_batch(session: Session, batch: SubmissionBatch) -> None:
                     candidate_index=candidate_count,
                     start_page=first_preview_page,
                     end_page=first_preview_page + pdf_page_count - 1,
-                    student_name=identity.student_name,
-                    student_id=identity.student_id,
-                    split_confidence=identity.confidence,
+                    student_name=student_name,
+                    student_id=student_id,
+                    split_confidence=confidence,
                     needs_review=needs_review,
                     confirmed=False,
                     source_filename=original_name,
                     source_storage_path=stored.relative_path,
-                    review_notes="文件名无法可靠解析学生信息" if needs_review else None,
+                    review_notes=review_notes,
+                    roster_entry_id=roster_entry_id,
                 )
                 session.add(candidate)
                 session.flush()
@@ -500,24 +558,58 @@ def _prepare_fixed_page_batch(session: Session, batch: SubmissionBatch) -> None:
             )
         )
     batch.total_pages = len(rendered_pages)
+
+    roster_index = build_roster_index(session, batch.exam_id)
+    expected_candidate_count = -(-len(rendered_pages) // batch.pages_per_submission)  # ceil
+    roster_size = len(roster_index.entries)
+    roster_count_mismatch = (
+        not roster_index.is_empty() and roster_size != expected_candidate_count
+    )
     candidate_index = 0
     for start_page in range(1, len(rendered_pages) + 1, batch.pages_per_submission):
         candidate_index += 1
         end_page = min(start_page + batch.pages_per_submission - 1, len(rendered_pages))
         incomplete = (end_page - start_page + 1) != batch.pages_per_submission
+        roster_entry = roster_index.order_to_entry.get(candidate_index - 1)
+        student_name = roster_entry.student_name if roster_entry else None
+        student_id = roster_entry.student_id if roster_entry else None
+        roster_entry_id = roster_entry.id if roster_entry else None
+        if roster_entry is not None:
+            split_confidence = 0.65 if incomplete else 0.95
+        else:
+            split_confidence = 0.65 if incomplete else 0.9
+        review_notes_parts: list[str] = []
+        if incomplete:
+            review_notes_parts.append("总页数不能被每份页数整除，需要确认最后一段")
+        if roster_count_mismatch:
+            review_notes_parts.append(
+                f"名单条目数 {roster_size} 与机械拆分份数 {expected_candidate_count} 不一致，请确认绑定"
+            )
+        elif roster_entry is None and not roster_index.is_empty():
+            review_notes_parts.append("未从名单中找到对应学生")
+        needs_review = bool(
+            incomplete
+            or roster_count_mismatch
+            or roster_entry is None
+            or not student_name
+            or not student_id
+        )
         session.add(
             BatchSplitCandidate(
                 batch_id=batch.id,
                 candidate_index=candidate_index,
                 start_page=start_page,
                 end_page=end_page,
-                split_confidence=0.65 if incomplete else 0.9,
-                needs_review=incomplete,
+                student_name=student_name,
+                student_id=student_id,
+                split_confidence=split_confidence,
+                needs_review=needs_review,
                 confirmed=False,
-                review_notes="总页数不能被每份页数整除，需要确认最后一段" if incomplete else None,
+                review_notes=" / ".join(review_notes_parts) or None,
+                roster_entry_id=roster_entry_id,
             )
         )
-    batch.status = BatchStatus.needs_split_review.value if len(rendered_pages) % batch.pages_per_submission else BatchStatus.split_ready.value
+    batch.status = _split_status_for_candidates(list(batch.candidates))
     session.commit()
 
 
@@ -560,7 +652,8 @@ def _prepare_auto_split_batch(session: Session, batch: SubmissionBatch) -> None:
         )
     batch.total_pages = len(rendered_pages)
     batch.raw_split_extraction_response = {"pages": header_results}
-    _create_auto_split_candidates(session, batch, header_results)
+    roster_index = build_roster_index(session, batch.exam_id)
+    _create_auto_split_candidates(session, batch, header_results, roster_index)
     batch.status = _split_status_for_candidates(list(batch.candidates))
     session.commit()
 
@@ -750,7 +843,14 @@ def _clean_student_name(name: str, student_id: str | None) -> str | None:
     return cleaned[:24] if cleaned else None
 
 
-def _create_auto_split_candidates(session: Session, batch: SubmissionBatch, headers: list[dict[str, Any]]) -> None:
+def _create_auto_split_candidates(
+    session: Session,
+    batch: SubmissionBatch,
+    headers: list[dict[str, Any]],
+    roster_index: RosterIndex | None = None,
+) -> None:
+    if roster_index is None:
+        roster_index = build_roster_index(session, batch.exam_id)
     starts: list[int] = []
     previous_identity: tuple[str | None, str | None] = (None, None)
     previous_page_number: int | None = None
@@ -794,7 +894,24 @@ def _create_auto_split_candidates(session: Session, batch: SubmissionBatch, head
             float(header.get("overall_confidence") or 0.0),
             float(header.get("is_first_page_confidence") or 0.0),
         )
-        needs_review = confidence < SPLIT_CONFIDENCE_THRESHOLD or not student_name or not student_id
+        roster_match = match_roster_identity(roster_index, student_name, student_id)
+        roster_entry_id: int | None = None
+        review_notes_parts: list[str] = []
+        if roster_match.entry is not None:
+            roster_entry_id = roster_match.entry.id
+            student_name = roster_match.entry.student_name or student_name
+            student_id = roster_match.entry.student_id or student_id
+            confidence = max(confidence, 0.9)
+        elif not roster_index.is_empty():
+            review_notes_parts.append("未在名单中找到匹配学生")
+        needs_review = (
+            confidence < SPLIT_CONFIDENCE_THRESHOLD
+            or not student_name
+            or not student_id
+            or (roster_match.entry is None and not roster_index.is_empty())
+        )
+        if needs_review and not review_notes_parts:
+            review_notes_parts.append("自动拆分置信度较低，需要人工确认")
         session.add(
             BatchSplitCandidate(
                 batch_id=batch.id,
@@ -806,7 +923,8 @@ def _create_auto_split_candidates(session: Session, batch: SubmissionBatch, head
                 split_confidence=confidence,
                 needs_review=needs_review,
                 confirmed=False,
-                review_notes="自动拆分置信度较低，需要人工确认" if needs_review else None,
+                review_notes=" / ".join(review_notes_parts) or None,
+                roster_entry_id=roster_entry_id,
             )
         )
 

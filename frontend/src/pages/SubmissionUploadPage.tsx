@@ -24,6 +24,8 @@ import type {
   BatchStatus,
   BatchUploadMode,
   ExamResultsResponse,
+  RosterEntry,
+  RosterStatus,
   SubmissionBatchDetail,
 } from '../lib/types'
 
@@ -261,6 +263,36 @@ export function SubmissionUploadPage() {
     setCandidateDrafts((current) => current.map((candidate, candidateIndex) => candidateIndex === index ? { ...candidate, ...patch } : candidate))
   }
 
+  function handleAutoBindRoster() {
+    const rosterEntries = results?.exam.roster_entries ?? []
+    if (rosterEntries.length === 0) {
+      setError('当前考试还没有名单，请先在「考试名单」页面上传并确认。')
+      return
+    }
+    setCandidateDrafts((current) => {
+      const activeIndices = current
+        .map((draft, idx) => ({ draft, idx }))
+        .filter(({ draft }) => !draft.excluded)
+      return current.map((draft, idx) => {
+        const order = activeIndices.findIndex((entry) => entry.idx === idx)
+        if (order < 0) {
+          return draft
+        }
+        const rosterEntry = rosterEntries[order]
+        if (!rosterEntry) {
+          return draft
+        }
+        return {
+          ...draft,
+          roster_entry_id: rosterEntry.id,
+          student_name: rosterEntry.student_name ?? draft.student_name,
+          student_id: rosterEntry.student_id ?? draft.student_id,
+        }
+      })
+    })
+    setFeedback('已按名单顺序自动绑定，记得保存。')
+  }
+
   const exam = results?.exam
   const selectedTab = BATCH_TABS.find((tab) => tab.mode === activeTab) ?? BATCH_TABS[0]
   const batchPages = activeBatch?.pages.map((page) => ({ label: `Page ${page.page_no}`, url: buildStorageUrl(page.image_path) })) ?? []
@@ -288,6 +320,7 @@ export function SubmissionUploadPage() {
           <Metric label="总分" value={formatScore(exam?.total_score ?? 0)} />
           <Metric label="评分标准状态" value={exam?.needs_rubric_review ? '需要老师确认' : '已确认'} />
         </div>
+        <RosterStatusBar examId={numericExamId} status={exam?.roster_status ?? 'not_uploaded'} entryCount={exam?.roster_entries.length ?? 0} />
       </SectionCard>
 
       {loading ? <InlineMessage message="正在加载批量结果..." /> : null}
@@ -385,9 +418,17 @@ export function SubmissionUploadPage() {
                     onChange={setActivePageIndex}
                   />
                 ) : null}
-                <CandidateEditor candidates={activeBatch.candidates} drafts={candidateDrafts} onChange={updateDraft} />
+                <CandidateEditor candidates={activeBatch.candidates} drafts={candidateDrafts} rosterEntries={results?.exam.roster_entries ?? []} onChange={updateDraft} />
                 {validationError ? <InlineMessage message={validationError} tone="error" /> : null}
                 <div className="flex flex-wrap gap-3">
+                  <button
+                    type="button"
+                    onClick={handleAutoBindRoster}
+                    disabled={batchBusy || (results?.exam.roster_entries.length ?? 0) === 0}
+                    className="rounded-full border border-slateBlue-200 bg-slateBlue-50 px-4 py-2 text-xs font-semibold text-slateBlue-500 transition hover:bg-slateBlue-100 disabled:opacity-50"
+                  >
+                    按名单顺序自动绑定
+                  </button>
                   <button
                     type="button"
                     onClick={() => void handleSaveCandidates()}
@@ -560,11 +601,17 @@ function BatchUploadForm({
   )
 }
 
-function CandidateEditor({ candidates, drafts, onChange }: { candidates: BatchSplitCandidate[]; drafts: BatchCandidateUpdatePayload[]; onChange: (index: number, patch: Partial<BatchCandidateUpdatePayload>) => void }) {
+function CandidateEditor({ candidates, drafts, rosterEntries, onChange }: { candidates: BatchSplitCandidate[]; drafts: BatchCandidateUpdatePayload[]; rosterEntries: RosterEntry[]; onChange: (index: number, patch: Partial<BatchCandidateUpdatePayload>) => void }) {
   if (drafts.length === 0) {
     return <InlineMessage message="暂无拆分候选。" />
   }
   const candidateById = new Map(candidates.map((candidate) => [candidate.id, candidate]))
+  const rosterUsage = new Map<number, number>()
+  drafts.forEach((draft, idx) => {
+    if (draft.roster_entry_id != null && !draft.excluded) {
+      rosterUsage.set(draft.roster_entry_id, idx)
+    }
+  })
   return (
     <div className="space-y-3">
       {drafts.map((draft, index) => {
@@ -572,6 +619,7 @@ function CandidateEditor({ candidates, drafts, onChange }: { candidates: BatchSp
         const splitConfidence = original?.split_confidence ?? 0
         const excluded = Boolean(draft.excluded)
         const risky = Boolean(!excluded && (original?.needs_review || splitConfidence < 0.75 || original?.error_message))
+        const conflictsWithOther = draft.roster_entry_id != null && rosterUsage.get(draft.roster_entry_id) !== index
         return (
           <div key={draft.id ?? index} className={toClassNames('rounded-2xl border p-4', excluded ? 'border-ink-900/10 bg-ink-50 opacity-70' : risky ? 'border-gold-200 bg-gold-50/60' : 'border-ink-900/10 bg-white')}>
             <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -580,6 +628,9 @@ function CandidateEditor({ candidates, drafts, onChange }: { candidates: BatchSp
                 <div className="mt-1 flex flex-wrap items-center gap-2 text-xs font-semibold text-ink-700">
                   {excluded ? <span className="rounded-full bg-ink-900/10 px-2 py-1">已忽略</span> : null}
                   <span className="rounded-full bg-white px-2 py-1 ring-1 ring-inset ring-ink-900/10">置信度 {Math.round(splitConfidence * 100)}%</span>
+                  {draft.roster_entry_id != null ? (
+                    <span className="rounded-full bg-sage-100 px-2 py-1 text-sage-500 ring-1 ring-inset ring-sage-200">已绑定名单</span>
+                  ) : null}
                 </div>
               </div>
               <div className="grid gap-2 sm:grid-cols-2 lg:w-56">
@@ -588,6 +639,9 @@ function CandidateEditor({ candidates, drafts, onChange }: { candidates: BatchSp
               </div>
             </div>
             {original?.error_message && !excluded ? <InlineMessage message={original.error_message} tone="error" /> : null}
+            {conflictsWithOther ? (
+              <div className="mb-3 rounded-2xl border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">该名单条目已经绑定到其它候选段，请改选其它学生。</div>
+            ) : null}
             {risky ? (
               <div className="mb-3 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
                 <div className="font-semibold">该候选需要人工复核后才能确认。</div>
@@ -602,16 +656,55 @@ function CandidateEditor({ candidates, drafts, onChange }: { candidates: BatchSp
                   <NumberInput label="结束页" value={draft.end_page} disabled={excluded} onChange={(value) => onChange(index, { end_page: value })} />
                 </div>
                 <div className="grid min-w-0 gap-3 md:grid-cols-2">
-                  <TextInput label="学生姓名" value={draft.student_name ?? ''} disabled={excluded} onChange={(value) => onChange(index, { student_name: value })} />
-                  <TextInput label="学号" value={draft.student_id ?? ''} disabled={excluded} onChange={(value) => onChange(index, { student_id: value })} />
+                  <TextInput label="学生姓名" value={draft.student_name ?? ''} disabled={excluded} onChange={(value) => onChange(index, { student_name: value, roster_entry_id: null })} />
+                  <TextInput label="学号" value={draft.student_id ?? ''} disabled={excluded} onChange={(value) => onChange(index, { student_id: value, roster_entry_id: null })} />
                 </div>
               </div>
+              {rosterEntries.length > 0 ? (
+                <RosterPicker
+                  entries={rosterEntries}
+                  selected={draft.roster_entry_id ?? null}
+                  disabled={excluded}
+                  onChange={(entryId) => {
+                    const entry = entryId == null ? null : rosterEntries.find((item) => item.id === entryId) ?? null
+                    onChange(index, {
+                      roster_entry_id: entryId,
+                      student_name: entry?.student_name ?? draft.student_name ?? null,
+                      student_id: entry?.student_id ?? draft.student_id ?? null,
+                    })
+                  }}
+                />
+              ) : null}
               <TextInput label="复核备注" value={draft.review_notes ?? ''} disabled={excluded} onChange={(value) => onChange(index, { review_notes: value })} />
             </div>
           </div>
         )
       })}
     </div>
+  )
+}
+
+function RosterPicker({ entries, selected, disabled, onChange }: { entries: RosterEntry[]; selected: number | null; disabled?: boolean; onChange: (entryId: number | null) => void }) {
+  return (
+    <label className="flex min-w-0 flex-col gap-2">
+      <span className="text-sm font-semibold text-ink-800">从名单选择学生</span>
+      <select
+        value={selected ?? ''}
+        disabled={disabled}
+        onChange={(event) => {
+          const next = event.target.value
+          onChange(next ? Number(next) : null)
+        }}
+        className="h-12 w-full min-w-0 rounded-2xl border border-ink-900/10 bg-white px-4 outline-none transition disabled:bg-ink-50 disabled:text-ink-700 focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
+      >
+        <option value="">（未绑定，使用上方手填字段）</option>
+        {entries.map((entry) => (
+          <option key={entry.id} value={entry.id}>
+            {`#${entry.order_index + 1}  ${entry.student_name ?? ''}  ${entry.student_id ?? ''}`.trim()}
+          </option>
+        ))}
+      </select>
+    </label>
   )
 }
 
@@ -727,6 +820,7 @@ function candidateToDraft(candidate: BatchSplitCandidate): BatchCandidateUpdateP
     review_notes: candidate.review_notes,
     confirmed: candidate.confirmed,
     excluded: candidate.excluded,
+    roster_entry_id: candidate.roster_entry_id,
   }
 }
 
@@ -750,6 +844,34 @@ function validateCandidateDrafts(candidates: BatchCandidateUpdatePayload[], tota
 
 function isBatchActive(status: BatchStatus): boolean {
   return ['uploaded', 'splitting', 'materializing', 'grading'].includes(status)
+}
+
+function RosterStatusBar({ examId, status, entryCount }: { examId: number; status: RosterStatus; entryCount: number }) {
+  const label =
+    status === 'confirmed'
+      ? `已确认 ${entryCount} 名学生`
+      : status === 'needs_review'
+        ? `已上传 ${entryCount} 条，待确认`
+        : status === 'parsing'
+          ? 'AI 解析中...'
+          : '尚未上传名单'
+  const tone =
+    status === 'confirmed'
+      ? 'border-sage-200 bg-sage-50 text-sage-500'
+      : status === 'needs_review' || status === 'parsing'
+        ? 'border-gold-200 bg-gold-50 text-amber-900'
+        : 'border-ink-900/10 bg-paper text-ink-700'
+  return (
+    <div className={toClassNames('mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-sm', tone)}>
+      <div className="font-semibold">考试名单：{label}</div>
+      <Link
+        to={Number.isFinite(examId) ? `/exams/${examId}/roster` : '/exams'}
+        className="rounded-full border border-ink-900/10 bg-white px-3 py-2 text-xs font-semibold text-ink-950 transition hover:bg-paper"
+      >
+        管理名单
+      </Link>
+    </div>
+  )
 }
 
 function formatBatchMode(mode: BatchUploadMode): string {

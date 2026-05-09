@@ -56,7 +56,7 @@ def process_submission_task(submission_id: int) -> dict[str, int | str]:
         session.close()
 
 
-@celery_app.task(name="app.workers.tasks.prepare_batch_split_task")
+@celery_app.task(name="app.workers.tasks.prepare_batch_split_task", soft_time_limit=1800, time_limit=2400)
 def prepare_batch_split_task(batch_id: int) -> dict[str, int | str]:
     session = SessionLocal()
     try:

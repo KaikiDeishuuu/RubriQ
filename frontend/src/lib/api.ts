@@ -15,6 +15,8 @@ import type {
   ProcessResponse,
   Question,
   QuestionUpdatePayload,
+  RosterDetail,
+  RosterReplaceRequest,
   RubricItemCreatePayload,
   RubricItemUpdatePayload,
   SubmissionBatchDetail,
@@ -268,6 +270,55 @@ export async function deleteRubricFile(examId: number, fileId: number): Promise<
 
 export async function deleteSubmission(submissionId: number): Promise<void> {
   await request<void>(`/submissions/${submissionId}`, { method: 'DELETE' })
+}
+
+export async function getRoster(examId: number): Promise<RosterDetail> {
+  return request<RosterDetail>(`/exams/${examId}/roster`)
+}
+
+export async function uploadRoster(
+  examId: number,
+  file: File,
+  sourceKind?: 'pdf' | 'csv' | 'xlsx',
+): Promise<ExamDetail> {
+  const formData = new FormData()
+  formData.append('file', file)
+  if (sourceKind) {
+    formData.append('source_kind', sourceKind)
+  }
+  return request<ExamDetail>(`/exams/${examId}/roster/upload`, {
+    method: 'POST',
+    body: formData,
+  })
+}
+
+export async function parseRoster(examId: number, examFileId?: number): Promise<ExamDetail> {
+  const searchParams = new URLSearchParams()
+  if (examFileId !== undefined) {
+    searchParams.set('exam_file_id', String(examFileId))
+  }
+  const suffix = searchParams.toString() ? `?${searchParams.toString()}` : ''
+  return request<ExamDetail>(`/exams/${examId}/roster/parse${suffix}`, {
+    method: 'POST',
+  })
+}
+
+export async function putRoster(examId: number, payload: RosterReplaceRequest): Promise<ExamDetail> {
+  return request<ExamDetail>(`/exams/${examId}/roster`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function confirmRoster(examId: number): Promise<ExamDetail> {
+  return request<ExamDetail>(`/exams/${examId}/roster/confirm`, { method: 'POST' })
+}
+
+export async function deleteRoster(examId: number): Promise<ExamDetail> {
+  return request<ExamDetail>(`/exams/${examId}/roster`, { method: 'DELETE' })
 }
 
 export async function downloadBlob(blob: Blob, filename: string): Promise<void> {

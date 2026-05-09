@@ -58,10 +58,43 @@ export interface ExamDetail {
   description: string | null
   total_score: string | number
   needs_rubric_review: boolean
+  roster_status: RosterStatus
+  roster_error_message: string | null
   created_at: string
   updated_at: string
   files: ExamFile[]
   questions: Question[]
+  roster_entries: RosterEntry[]
+}
+
+export type RosterStatus = 'not_uploaded' | 'parsing' | 'needs_review' | 'confirmed'
+
+export interface RosterEntry {
+  id: number
+  exam_id: number
+  order_index: number
+  student_name: string | null
+  student_id: string | null
+  source: string
+  created_at: string
+  updated_at: string
+}
+
+export interface RosterDetail {
+  exam_id: number
+  roster_status: RosterStatus
+  roster_error_message: string | null
+  entries: RosterEntry[]
+}
+
+export interface RosterEntryInput {
+  student_name?: string | null
+  student_id?: string | null
+}
+
+export interface RosterReplaceRequest {
+  entries: RosterEntryInput[]
+  source?: string
 }
 
 export interface SubmissionSummary {
@@ -178,6 +211,7 @@ export interface BatchSplitCandidate {
   source_storage_path: string | null
   error_message: string | null
   submission_id: number | null
+  roster_entry_id: number | null
   created_at: string
   updated_at: string
 }
@@ -217,6 +251,7 @@ export interface BatchCandidateUpdatePayload {
   review_notes?: string | null
   confirmed: boolean
   excluded?: boolean
+  roster_entry_id?: number | null
 }
 
 export interface BatchConfirmResponse {

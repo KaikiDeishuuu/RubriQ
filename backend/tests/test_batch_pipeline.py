@@ -10,7 +10,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.core.config import settings
 from app.db.base import Base
-from app.models import BatchStatus, BatchUploadMode, Exam, Question, Submission, SubmissionBatch, SubmissionStatus
+from app.models import BatchStatus, BatchUploadMode, Exam, Question, RosterEntry, Submission, SubmissionBatch, SubmissionStatus
 from app.schemas.batch import BatchCandidateUpdate
 from app.services import batch_pipeline
 from app.services.batch_pipeline import (
@@ -22,6 +22,7 @@ from app.services.batch_pipeline import (
     start_batch_grading,
     update_batch_candidates,
 )
+from app.services.roster import ParsedRosterEntry, replace_roster_entries
 
 
 @pytest.fixture()
@@ -610,6 +611,118 @@ def _create_exam(session) -> Exam:
     session.add(Question(exam_id=exam.id, question_no="1", title="Question 1"))
     session.commit()
     return exam
+
+
+def _seed_roster(session, exam_id: int, entries: list[tuple[str | None, str | None]]) -> list[RosterEntry]:
+    parsed = [ParsedRosterEntry(name, sid, source="manual") for name, sid in entries]
+    replace_roster_entries(session, exam_id, parsed, source="manual")
+    session.commit()
+    return list(
+        session.query(RosterEntry)
+        .filter(RosterEntry.exam_id == exam_id)
+        .order_by(RosterEntry.order_index)
+    )
+
+
+def test_fixed_page_batch_auto_binds_roster_entries(session) -> None:
+    exam = _create_exam(session)
+    roster = _seed_roster(
+        session,
+        exam.id,
+        [("张三", "20240101"), ("李四", "20240102"), ("王五", "20240103")],
+    )
+    source_pdf = settings.storage_dir / "combined.pdf"
+    _create_pdf(source_pdf, 6)
+    batch = _create_batch(session, exam.id, BatchUploadMode.combined_fixed.value, source_pdf, pages_per_submission=2)
+
+    prepared = prepare_batch_split(session, batch.id)
+
+    # All candidates auto-bound and data-complete, but still await teacher confirmation
+    assert prepared.status == BatchStatus.needs_split_review.value
+    assert [(c.start_page, c.end_page) for c in prepared.candidates] == [(1, 2), (3, 4), (5, 6)]
+    assert [c.student_name for c in prepared.candidates] == ["张三", "李四", "王五"]
+    assert [c.student_id for c in prepared.candidates] == ["20240101", "20240102", "20240103"]
+    assert [c.roster_entry_id for c in prepared.candidates] == [entry.id for entry in roster]
+    assert all(not c.needs_review for c in prepared.candidates)
+    assert all(not c.confirmed for c in prepared.candidates)
+
+
+def test_fixed_page_batch_marks_review_when_roster_size_mismatches(session) -> None:
+    exam = _create_exam(session)
+    _seed_roster(session, exam.id, [("张三", "20240101")])  # only 1 entry, expect 3 candidates
+    source_pdf = settings.storage_dir / "combined.pdf"
+    _create_pdf(source_pdf, 6)
+    batch = _create_batch(session, exam.id, BatchUploadMode.combined_fixed.value, source_pdf, pages_per_submission=2)
+
+    prepared = prepare_batch_split(session, batch.id)
+
+    assert prepared.status == BatchStatus.needs_split_review.value
+    assert all(c.needs_review for c in prepared.candidates)
+    assert prepared.candidates[0].student_name == "张三"
+    assert prepared.candidates[1].student_name is None
+    assert prepared.candidates[1].roster_entry_id is None
+    assert prepared.candidates[1].review_notes is not None
+
+
+def test_update_candidates_snaps_student_fields_to_roster_entry(session) -> None:
+    exam = _create_exam(session)
+    roster = _seed_roster(session, exam.id, [("张三", "20240101"), ("李四", "20240102")])
+    source_pdf = settings.storage_dir / "combined.pdf"
+    _create_pdf(source_pdf, 4)
+    batch = _create_batch(session, exam.id, BatchUploadMode.combined_fixed.value, source_pdf, pages_per_submission=2)
+    prepare_batch_split(session, batch.id)
+
+    candidate_ids = [c.id for c in batch.candidates]
+    updated = update_batch_candidates(
+        session,
+        batch.id,
+        [
+            BatchCandidateUpdate(id=candidate_ids[0], start_page=1, end_page=2, confirmed=True, roster_entry_id=roster[1].id, student_name="错名", student_id="错号"),
+            BatchCandidateUpdate(id=candidate_ids[1], start_page=3, end_page=4, confirmed=True, roster_entry_id=roster[0].id),
+        ],
+    )
+
+    by_idx = {c.candidate_index: c for c in updated.candidates}
+    assert by_idx[1].student_name == "李四"
+    assert by_idx[1].student_id == "20240102"
+    assert by_idx[1].roster_entry_id == roster[1].id
+    assert by_idx[2].student_name == "张三"
+    assert by_idx[2].roster_entry_id == roster[0].id
+
+
+def test_update_candidates_rejects_duplicate_roster_entry_ids(session) -> None:
+    exam = _create_exam(session)
+    roster = _seed_roster(session, exam.id, [("张三", "20240101"), ("李四", "20240102")])
+    source_pdf = settings.storage_dir / "combined.pdf"
+    _create_pdf(source_pdf, 4)
+    batch = _create_batch(session, exam.id, BatchUploadMode.combined_fixed.value, source_pdf, pages_per_submission=2)
+    prepare_batch_split(session, batch.id)
+    ids = [c.id for c in batch.candidates]
+
+    with pytest.raises(BatchPipelineError):
+        update_batch_candidates(
+            session,
+            batch.id,
+            [
+                BatchCandidateUpdate(id=ids[0], start_page=1, end_page=2, confirmed=True, roster_entry_id=roster[0].id),
+                BatchCandidateUpdate(id=ids[1], start_page=3, end_page=4, confirmed=True, roster_entry_id=roster[0].id),
+            ],
+        )
+
+
+def test_zip_batch_overrides_filename_identity_with_roster_match(session) -> None:
+    exam = _create_exam(session)
+    _seed_roster(session, exam.id, [("Alice Official", "20240001")])
+    zip_path = _create_zip_with_pdfs(settings.storage_dir / "source.zip", ["20240001_Alice.pdf"])
+    batch = _create_batch(session, exam.id, BatchUploadMode.zip.value, zip_path)
+
+    prepared = prepare_batch_split(session, batch.id)
+
+    candidate = prepared.candidates[0]
+    assert candidate.student_name == "Alice Official"
+    assert candidate.student_id == "20240001"
+    assert candidate.roster_entry_id is not None
+    assert not candidate.needs_review
 
 
 def _create_batch(session, exam_id: int, mode: str, source_path: Path, pages_per_submission: int | None = None) -> SubmissionBatch:

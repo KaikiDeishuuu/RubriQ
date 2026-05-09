@@ -41,6 +41,7 @@ class BatchSplitCandidateRead(BaseSchema):
     source_storage_path: str | None = None
     error_message: str | None = None
     submission_id: int | None = None
+    roster_entry_id: int | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -80,6 +81,7 @@ class BatchCandidateUpdate(BaseSchema):
     review_notes: str | None = None
     confirmed: bool = False
     excluded: bool = False
+    roster_entry_id: int | None = None
 
 
 class BatchCandidatesUpdateRequest(BaseSchema):

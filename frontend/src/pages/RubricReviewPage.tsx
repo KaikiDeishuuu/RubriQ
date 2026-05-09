@@ -173,6 +173,12 @@ export function RubricReviewPage() {
 				action={
 					<div className="flex flex-wrap gap-2">
 						<Link
+							to={Number.isFinite(numericExamId) ? `/exams/${numericExamId}/roster` : '/exams'}
+							className="rounded-full border border-ink-900/10 bg-white px-4 py-2 text-sm font-semibold text-ink-950 transition hover:bg-paper"
+						>
+							考试名单
+						</Link>
+						<Link
 							to={Number.isFinite(numericExamId) ? `/exams/${numericExamId}/submissions` : '/exams'}
 							className="rounded-full border border-ink-900/10 bg-white px-4 py-2 text-sm font-semibold text-ink-950 transition hover:bg-paper"
 						>

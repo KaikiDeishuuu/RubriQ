@@ -26,6 +26,9 @@ class Exam(Base, TimestampMixin):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     total_score: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, default=Decimal("0"))
     needs_rubric_review: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    roster_status: Mapped[str] = mapped_column(String(50), nullable=False, default="not_uploaded")
+    roster_raw_ai_response: Mapped[str | None] = mapped_column(Text, nullable=True)
+    roster_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     files: Mapped[list["ExamFile"]] = relationship(
         back_populates="exam",
@@ -46,6 +49,11 @@ class Exam(Base, TimestampMixin):
         back_populates="exam",
         cascade="all, delete-orphan",
         order_by="SubmissionBatch.created_at.desc()",
+    )
+    roster_entries: Mapped[list["RosterEntry"]] = relationship(
+        back_populates="exam",
+        cascade="all, delete-orphan",
+        order_by="RosterEntry.order_index.asc()",
     )
 
 
@@ -118,9 +126,14 @@ class BatchSplitCandidate(Base, TimestampMixin):
     source_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
     source_storage_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    roster_entry_id: Mapped[int | None] = mapped_column(
+        ForeignKey("exam_roster_entries.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     batch: Mapped[SubmissionBatch] = relationship(back_populates="candidates")
     submission: Mapped["Submission | None"] = relationship(back_populates="batch_candidate", uselist=False)
+    roster_entry: Mapped["RosterEntry | None"] = relationship(back_populates="candidates")
 
     @property
     def submission_id(self) -> int | None:
@@ -280,3 +293,20 @@ class AnswerRubricResult(Base, TimestampMixin):
 
     answer: Mapped[Answer] = relationship(back_populates="rubric_results")
     rubric_item: Mapped[RubricItem] = relationship()
+
+
+class RosterEntry(Base, TimestampMixin):
+    __tablename__ = "exam_roster_entries"
+    __table_args__ = (
+        UniqueConstraint("exam_id", "order_index", name="uq_roster_entries_exam_order"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    exam_id: Mapped[int] = mapped_column(ForeignKey("exams.id", ondelete="CASCADE"), nullable=False)
+    order_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    student_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    student_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source: Mapped[str] = mapped_column(String(20), nullable=False, default="manual")
+
+    exam: Mapped[Exam] = relationship(back_populates="roster_entries")
+    candidates: Mapped[list["BatchSplitCandidate"]] = relationship(back_populates="roster_entry")

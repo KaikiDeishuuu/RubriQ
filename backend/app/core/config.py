@@ -17,6 +17,7 @@ AIRouteKey = Literal[
     "vision_student_extraction",
     "vision_split_header",
     "vision_grading_review",
+    "vision_roster",
     "grading",
     "grading_review",
 ]
@@ -59,6 +60,7 @@ class Settings(BaseSettings):
     ai_vision_student_extraction_chain: str | None = Field(default=None, alias="AI_VISION_STUDENT_EXTRACTION_CHAIN")
     ai_vision_split_header_chain: str | None = Field(default=None, alias="AI_VISION_SPLIT_HEADER_CHAIN")
     ai_vision_grading_review_chain: str | None = Field(default=None, alias="AI_VISION_GRADING_REVIEW_CHAIN")
+    ai_vision_roster_chain: str | None = Field(default=None, alias="AI_VISION_ROSTER_CHAIN")
     ai_grading_chain: str | None = Field(default=None, alias="AI_GRADING_CHAIN")
     ai_grading_review_chain: str | None = Field(default=None, alias="AI_GRADING_REVIEW_CHAIN")
     ocr_preprocess_enabled: bool = Field(default=False, alias="OCR_PREPROCESS_ENABLED")
@@ -191,6 +193,8 @@ class Settings(BaseSettings):
             return self.ocr_preprocess_student_enabled
         if route_key == "vision_split_header":
             return self.ocr_preprocess_split_header_enabled
+        if route_key == "vision_roster":
+            return self.ocr_preprocess_rubric_enabled
         return False
 
     def ai_model_candidates(self, route_key: AIRouteKey) -> list[AIModelCandidate]:
@@ -227,6 +231,8 @@ class Settings(BaseSettings):
             return self.ai_vision_split_header_chain
         if route_key == "vision_grading_review" and self.ai_vision_grading_review_chain:
             return self.ai_vision_grading_review_chain
+        if route_key == "vision_roster" and self.ai_vision_roster_chain:
+            return self.ai_vision_roster_chain
         if _route_profile(route_key) == "vision" and self.ai_vision_chain:
             return self.ai_vision_chain
         if route_key == "grading_review" and self.ai_grading_review_chain:

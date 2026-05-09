@@ -26,6 +26,7 @@ def load_exam_detail(session: Session, exam_id: int) -> Exam:
             selectinload(Exam.questions).selectinload(Question.rubric_items),
             selectinload(Exam.submissions),
             selectinload(Exam.batches).selectinload(SubmissionBatch.candidates).selectinload(BatchSplitCandidate.submission),
+            selectinload(Exam.roster_entries),
         )
     )
     exam = session.execute(stmt).scalar_one_or_none()

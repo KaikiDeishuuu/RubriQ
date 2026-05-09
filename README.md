@@ -47,6 +47,7 @@ docker compose up --build
 - `AI_VISION_STUDENT_EXTRACTION_CHAIN`
 - `AI_VISION_SPLIT_HEADER_CHAIN`
 - `AI_VISION_GRADING_REVIEW_CHAIN`
+- `AI_VISION_ROSTER_CHAIN`
 - `AI_GRADING_CHAIN`
 - `AI_GRADING_REVIEW_ENABLED`
 - `AI_GRADING_REVIEW_MODEL`
@@ -96,6 +97,11 @@ docker compose up --build
 - `POST /api/exams`
 - `POST /api/exams/{exam_id}/rubric/upload`
 - `POST /api/exams/{exam_id}/rubric/parse`
+- `POST /api/exams/{exam_id}/roster/upload`
+- `POST /api/exams/{exam_id}/roster/parse`
+- `PUT /api/exams/{exam_id}/roster`
+- `POST /api/exams/{exam_id}/roster/confirm`
+- `GET /api/exams/{exam_id}/roster`
 - `POST /api/exams/{exam_id}/submissions/upload`
 - `POST /api/submissions/{submission_id}/process`
 - `PUT /api/answers/{answer_id}/override`
@@ -108,3 +114,4 @@ docker compose up --build
 - The AI never grades autonomously without storing rubric-item evidence.
 - Low confidence or empty extraction marks a submission for human review.
 - Raw AI responses are stored for debugging and auditability.
+- An optional **exam roster** (PDF / CSV / Excel) can be uploaded at `/exams/{id}/roster` before splitting. Once confirmed, the fixed-page splitter auto-binds candidates to roster entries by order, and the auto-splitter cross-validates extracted identities against the roster (matched entries override OCR noise; unmatched ones are flagged for review). PDF rosters reuse the vision pipeline (`AI_VISION_ROSTER_CHAIN` overrides the default chain when set).

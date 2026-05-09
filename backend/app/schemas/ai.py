@@ -67,3 +67,12 @@ class GradingResult(BaseSchema):
     missing_points: list[str] = Field(default_factory=list)
     final_comment: str
     needs_human_review: bool
+
+
+class ExtractedRosterEntry(BaseSchema):
+    student_name: str | None = None
+    student_id: str | None = None
+
+
+class RosterParseResult(BaseSchema):
+    students: list[ExtractedRosterEntry] = Field(default_factory=list)

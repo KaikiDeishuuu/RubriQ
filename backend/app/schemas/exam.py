@@ -110,10 +110,44 @@ class ExamDetail(BaseSchema):
     description: str | None = None
     total_score: Decimal
     needs_rubric_review: bool
+    roster_status: str = "not_uploaded"
+    roster_error_message: str | None = None
     created_at: datetime
     updated_at: datetime
     files: list[ExamFileRead] = Field(default_factory=list)
     questions: list[QuestionRead] = Field(default_factory=list)
+    roster_entries: list["RosterEntryRead"] = Field(default_factory=list)
+
+
+class RosterEntryRead(BaseSchema):
+    id: int
+    exam_id: int
+    order_index: int
+    student_name: str | None = None
+    student_id: str | None = None
+    source: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class RosterEntryInput(BaseSchema):
+    student_name: str | None = None
+    student_id: str | None = None
+
+
+class RosterReplaceRequest(BaseSchema):
+    entries: list[RosterEntryInput] = Field(default_factory=list)
+    source: str = "manual"
+
+
+class RosterDetail(BaseSchema):
+    exam_id: int
+    roster_status: str
+    roster_error_message: str | None = None
+    entries: list[RosterEntryRead] = Field(default_factory=list)
+
+
+ExamDetail.model_rebuild()
 
 
 class ExamResultRow(BaseSchema):
