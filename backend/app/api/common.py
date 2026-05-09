@@ -15,6 +15,7 @@ from app.schemas.submission import (
     SubmissionSummary,
 )
 from app.utils.score import clamp_score
+from app.services.pipeline import _to_decimal
 
 
 def load_exam_detail(session: Session, exam_id: int) -> Exam:
@@ -82,18 +83,18 @@ def recalculate_exam_total(session: Session, exam_id: int) -> Decimal:
     ).scalar_one()
     exam = session.get(Exam, exam_id)
     if exam is not None:
-        exam.total_score = Decimal(str(total))
+        exam.total_score = _to_decimal(total)
         session.flush()
-    return Decimal(str(total))
+    return _to_decimal(total)
 
 
 def recalculate_question_and_exam_totals(session: Session, question_id: int) -> Decimal:
     question = load_question_detail(session, question_id)
     total = sum((Decimal(str(rubric_item.max_score)) for rubric_item in question.rubric_items), Decimal("0"))
-    question.max_score = total
+    question.max_score = _to_decimal(total)
     session.flush()
     recalculate_exam_total(session, question.exam_id)
-    return total
+    return _to_decimal(total)
 
 
 def effective_answer_score(answer: Answer) -> Decimal:

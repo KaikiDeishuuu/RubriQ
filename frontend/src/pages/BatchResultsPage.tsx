@@ -4,6 +4,7 @@ import { Link, useParams } from 'react-router-dom'
 import {
   deleteSubmission,
   downloadBlob,
+  exportExamSubmissionsZip,
   exportResultsCsv,
   exportResultsPdf,
   exportResultsXlsx,
@@ -15,7 +16,7 @@ import { ConfirmDialog } from '../components/ConfirmDialog'
 import { SectionCard } from '../components/SectionCard'
 import { StatusBadge } from '../components/StatusBadge'
 
-type ExportFormat = 'csv' | 'xlsx' | 'pdf'
+type ExportFormat = 'csv' | 'xlsx' | 'pdf' | 'zip'
 
 async function exportResults(format: ExportFormat, examId: number): Promise<Blob> {
   if (format === 'csv') {
@@ -23,6 +24,9 @@ async function exportResults(format: ExportFormat, examId: number): Promise<Blob
   }
   if (format === 'xlsx') {
     return exportResultsXlsx(examId)
+  }
+  if (format === 'zip') {
+    return exportExamSubmissionsZip(examId)
   }
   return exportResultsPdf(examId)
 }
@@ -107,7 +111,10 @@ export function BatchResultsPage() {
     setExporting(format)
     try {
       const blob = await exportResults(format, numericExamId)
-      await downloadBlob(blob, `exam-${numericExamId}-results.${format}`)
+      const filename = format === 'zip'
+        ? `exam-${numericExamId}-submissions.zip`
+        : `exam-${numericExamId}-results.${format}`
+      await downloadBlob(blob, filename)
     } catch (error) {
       setError(error instanceof Error ? error.message : '导出结果失败')
     } finally {
@@ -152,6 +159,14 @@ export function BatchResultsPage() {
               className="rounded-full border border-slateBlue-200 bg-slateBlue-50 px-4 py-2 text-sm font-semibold text-slateBlue-500 transition hover:bg-slateBlue-100 disabled:opacity-50"
             >
               {exporting === 'pdf' ? '正在导出 PDF...' : '导出 PDF'}
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleExport('zip')}
+              disabled={exporting !== null}
+              className="rounded-full border border-sage-200 bg-sage-50 px-4 py-2 text-sm font-semibold text-sage-500 transition hover:bg-sage-100 disabled:opacity-50"
+            >
+              {exporting === 'zip' ? '正在打包评分说明...' : '批量导出评分说明 ZIP'}
             </button>
           </div>
         }

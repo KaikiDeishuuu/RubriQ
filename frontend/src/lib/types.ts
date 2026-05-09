@@ -112,6 +112,8 @@ export interface SubmissionSummary {
   source_mode: string | null
   split_confidence: number | null
   split_confirmed: boolean
+  deduction_summary: string | null
+  deduction_summary_edited: boolean
   created_at: string
   updated_at: string
 }
@@ -340,4 +342,9 @@ export interface SubmissionOverridePayload {
   teacher_override_score?: number | null
   teacher_comment?: string | null
   reviewed?: boolean | null
+}
+
+export interface DeductionSummaryUpdatePayload {
+  summary?: string | null
+  reset?: boolean
 }

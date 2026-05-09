@@ -36,8 +36,9 @@ from app.services.export import (
     build_exam_results_data,
     build_exam_results_pdf,
     build_exam_results_xlsx,
+    build_exam_submissions_zip,
 )
-from app.services.pipeline import PipelineError, parse_rubric_for_exam
+from app.services.pipeline import PipelineError, _to_decimal, parse_rubric_for_exam
 from app.storage.local import get_storage_service
 from app.utils.files import validate_pdf_upload
 
@@ -133,7 +134,7 @@ def update_question(question_id: int, payload: QuestionUpdate, session: Session 
     if payload.title is not None:
         question.title = payload.title
     if payload.max_score is not None:
-        question.max_score = Decimal(str(payload.max_score))
+        question.max_score = _to_decimal(payload.max_score)
     if payload.order_index is not None:
         question.order_index = payload.order_index
     recalculate_exam_total(session, question.exam_id)
@@ -151,7 +152,7 @@ def create_rubric_item(
     rubric_item = RubricItem(
         question_id=question.id,
         description=payload.description,
-        max_score=Decimal(str(payload.max_score)),
+        max_score=_to_decimal(payload.max_score),
         keywords=payload.keywords,
         order_index=payload.order_index,
     )
@@ -171,7 +172,7 @@ def update_rubric_item(
     if payload.description is not None:
         rubric_item.description = payload.description
     if payload.max_score is not None:
-        rubric_item.max_score = Decimal(str(payload.max_score))
+        rubric_item.max_score = _to_decimal(payload.max_score)
     if payload.keywords is not None:
         rubric_item.keywords = payload.keywords
     if payload.order_index is not None:
@@ -271,6 +272,18 @@ def export_exam_results_pdf(exam_id: int, session: Session = Depends(get_db)):
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="exam-{exam_id}-results.pdf"'},
     )
+
+
+@router.get("/{exam_id}/export-submissions.zip")
+def export_exam_submissions_zip(exam_id: int, session: Session = Depends(get_db)):
+    _load_exam_or_404(session, exam_id)
+    zip_bytes, total, failure_count = build_exam_submissions_zip(session, exam_id)
+    headers = {
+        "Content-Disposition": f'attachment; filename="exam-{exam_id}-submissions.zip"',
+        "X-Submission-Total": str(total),
+        "X-Submission-Failures": str(failure_count),
+    }
+    return Response(content=zip_bytes, media_type="application/zip", headers=headers)
 
 
 def _load_exam_or_404(session: Session, exam_id: int) -> Exam:

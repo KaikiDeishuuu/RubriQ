@@ -30,6 +30,8 @@ class SubmissionSummary(BaseSchema):
     source_mode: str | None = None
     split_confidence: float | None = None
     split_confirmed: bool = False
+    deduction_summary: str | None = None
+    deduction_summary_edited: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -102,6 +104,11 @@ class SubmissionOverride(BaseSchema):
     teacher_override_score: float | None = None
     teacher_comment: str | None = None
     reviewed: bool | None = None
+
+
+class DeductionSummaryUpdate(BaseSchema):
+    summary: str | None = None
+    reset: bool = False
 
 
 class SubmissionUploadResponse(BaseSchema):

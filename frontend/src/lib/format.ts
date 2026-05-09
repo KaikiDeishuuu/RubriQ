@@ -1,7 +1,7 @@
 import type { ConfidenceLevel, SubmissionStatus } from './types'
 
 const currencyFormatter = new Intl.NumberFormat('zh-CN', {
-  maximumFractionDigits: 2,
+  maximumFractionDigits: 1,
   minimumFractionDigits: 0,
 })
 
@@ -13,7 +13,9 @@ export function formatScore(value: string | number | null | undefined): string {
   if (Number.isNaN(numericValue)) {
     return String(value)
   }
-  return currencyFormatter.format(numericValue)
+  // Quantize to 0.1 (round-half-up) so display matches backend precision.
+  const quantized = Math.round(numericValue * 10) / 10
+  return currencyFormatter.format(quantized)
 }
 
 export function formatStatus(status: SubmissionStatus): string {

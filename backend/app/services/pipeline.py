@@ -79,8 +79,8 @@ _CONFIDENCE_RANK = {
 
 def _to_decimal(value: float | int | Decimal) -> Decimal:
     if isinstance(value, Decimal):
-        return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    return Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        return value.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+    return Decimal(str(value)).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
 
 
 def _question_payload(question: Question, *, include_keywords: bool = False) -> dict[str, Any]:
@@ -424,6 +424,8 @@ def process_submission(session: Session, submission_id: int) -> Submission:
         SubmissionStatus.needs_review.value if any_needs_review else SubmissionStatus.graded.value
     )
     session.commit()
+    refresh_deduction_summary(session, submission.id)
+    session.commit()
     return _load_submission(session, submission.id)
 
 
@@ -451,6 +453,7 @@ def apply_teacher_override(
         answer.needs_human_review = True
     session.flush()
     _recalculate_submission_total(session, answer.submission_id)
+    refresh_deduction_summary(session, answer.submission_id)
     session.commit()
     updated_answer = session.execute(
         select(Answer)
@@ -958,6 +961,7 @@ def review_answer_with_strong_model(
     for rubric_result in review_attempt.rubric_results:
         session.add(rubric_result)
     _recalculate_submission_total(session, answer.submission_id)
+    refresh_deduction_summary(session, answer.submission_id)
     session.commit()
     return answer
 
@@ -1128,4 +1132,101 @@ def _dedupe_strings(values: Iterable[str]) -> list[str]:
         seen.add(normalized)
         deduped.append(normalized)
     return deduped
+
+
+def generate_deduction_summary(submission: Submission) -> str:
+    """Render a human-readable Markdown-ish summary of where the student lost points.
+
+    The returned text follows the rubric structure 1:1 so teachers can audit it
+    quickly. Each question with a non-zero deduction becomes its own bullet block.
+    """
+
+    questions_by_id = {question.id: question for question in submission.exam.questions}
+    answers_in_order = sorted(
+        submission.answers,
+        key=lambda answer: (
+            questions_by_id.get(answer.question_id).order_index
+            if questions_by_id.get(answer.question_id) is not None
+            else answer.id
+        ),
+    )
+    blocks: list[str] = []
+    for answer in answers_in_order:
+        question = questions_by_id.get(answer.question_id) or answer.question
+        question_max = _to_decimal(answer.max_score if answer.max_score else (question.max_score if question else Decimal("0")))
+        if question_max <= 0:
+            continue
+        effective = _to_decimal(
+            answer.teacher_override_score if answer.teacher_override_score is not None else answer.score
+        )
+        if effective >= question_max:
+            continue
+        deduction = _to_decimal(question_max - effective)
+        question_label = f"第 {question.question_no} 题" if question else f"题目 {answer.question_id}"
+        title_suffix = f"：{question.title.strip()}" if question and question.title else ""
+        header = (
+            f"- {question_label}{title_suffix}（满分 {_format_score_value(question_max)}，"
+            f"得 {_format_score_value(effective)}，扣 {_format_score_value(deduction)}）"
+        )
+        bullet_lines: list[str] = []
+        rubric_items_by_id = {item.id: item for item in (question.rubric_items if question else [])}
+        for rubric_result in answer.rubric_results:
+            rubric_item = rubric_items_by_id.get(rubric_result.rubric_item_id)
+            rubric_max = _to_decimal(rubric_item.max_score) if rubric_item else _to_decimal(0)
+            awarded = _to_decimal(rubric_result.awarded_score)
+            if rubric_max <= 0 or awarded >= rubric_max:
+                continue
+            lost = _to_decimal(rubric_max - awarded)
+            description = (rubric_item.description.strip() if rubric_item else f"评分项 #{rubric_result.rubric_item_id}")
+            reason = (rubric_result.reason or "").strip() or "未给出说明，请人工复核"
+            bullet_lines.append(
+                f"  • {description}：扣 {_format_score_value(lost)} 分 —— {reason}"
+            )
+        if not bullet_lines:
+            fallback_reason = (answer.ai_comment or "").strip() or "AI 未输出具体扣分依据，请人工复核"
+            bullet_lines.append(f"  • {fallback_reason}")
+        blocks.append("\n".join([header, *bullet_lines]))
+    if not blocks:
+        return "本卷没有扣分项，全部题目得满分。"
+    return "\n".join(blocks)
+
+
+def refresh_deduction_summary(session: Session, submission_id: int) -> Submission | None:
+    """Regenerate `Submission.deduction_summary` from current rubric_results.
+
+    Skips if the teacher has already edited the summary (`deduction_summary_edited`).
+    """
+
+    submission = _load_submission(session, submission_id)
+    if submission.deduction_summary_edited:
+        return submission
+    submission.deduction_summary = generate_deduction_summary(submission)
+    session.flush()
+    return submission
+
+
+def set_teacher_deduction_summary(
+    session: Session,
+    submission_id: int,
+    summary: str | None,
+    *,
+    reset: bool = False,
+) -> Submission:
+    submission = _load_submission(session, submission_id)
+    if reset:
+        submission.deduction_summary_edited = False
+        submission.deduction_summary = generate_deduction_summary(submission)
+    else:
+        normalized = (summary or "").strip()
+        submission.deduction_summary = normalized or None
+        submission.deduction_summary_edited = bool(normalized)
+    session.commit()
+    return submission
+
+
+def _format_score_value(value: Decimal) -> str:
+    quantized = _to_decimal(value)
+    if quantized == quantized.to_integral_value():
+        return str(quantized.to_integral_value())
+    return str(quantized.normalize())
 

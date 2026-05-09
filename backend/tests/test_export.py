@@ -213,3 +213,79 @@ def test_export_submission_review_pdf_endpoint(monkeypatch) -> None:
     assert response.headers["content-type"] == "application/pdf"
     assert response.headers["content-disposition"] == 'attachment; filename="submission-34-review.pdf"'
     assert response.content == b"%PDF-1.4 review"
+
+
+def test_build_exam_submissions_zip_packages_each_student(tmp_path) -> None:
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+    session = SessionLocal()
+    try:
+        exam = Exam(title="集合测验", total_score=Decimal("5"))
+        session.add(exam)
+        session.flush()
+        question = Question(exam_id=exam.id, question_no="1", title="说明集合", max_score=Decimal("5"), order_index=0)
+        session.add(question)
+        session.flush()
+        rubric_item = RubricItem(
+            question_id=question.id,
+            description="给出定义",
+            max_score=Decimal("5"),
+            order_index=0,
+        )
+        session.add(rubric_item)
+        session.flush()
+        for student_id, student_name in [("S001", "张三"), ("S002", "李四"), ("BAD/ID", "王 五")]:
+            submission = Submission(
+                exam_id=exam.id,
+                student_name=student_name,
+                student_id=student_id,
+                original_pdf_path=f"submissions/{student_id}.pdf",
+                status=SubmissionStatus.graded.value,
+                total_score=Decimal("4"),
+            )
+            session.add(submission)
+            session.flush()
+            answer = Answer(
+                submission_id=submission.id,
+                question_id=question.id,
+                source_page=1,
+                extracted_answer="一个简短的答案。",
+                score=Decimal("4"),
+                max_score=Decimal("5"),
+                confidence="high",
+                ai_comment="逻辑通顺，但缺少具体例子。",
+                missing_points=["缺少例子"],
+            )
+            session.add(answer)
+            session.flush()
+            session.add(
+                AnswerRubricResult(
+                    answer_id=answer.id,
+                    rubric_item_id=rubric_item.id,
+                    awarded_score=Decimal("4"),
+                    evidence="答案给出了集合的定义。",
+                    reason="定义清晰，细节略少。",
+                )
+            )
+        session.commit()
+
+        zip_bytes, total, failures = export.build_exam_submissions_zip(session, exam.id)
+    finally:
+        session.close()
+
+    assert total == 3
+    assert failures == 0
+    import io as _io
+    import zipfile as _zip
+
+    archive = _zip.ZipFile(_io.BytesIO(zip_bytes))
+    names = sorted(archive.namelist())
+    assert any("S001-张三" in name for name in names)
+    assert any("S002-李四" in name for name in names)
+    # Bad characters should be replaced rather than crashing.
+    assert any("BAD_ID-王 五" in name or "BAD_ID-王_五" in name or "BAD_ID-王" in name for name in names)
+    for name in names:
+        with archive.open(name) as member:
+            data = member.read()
+            assert data.startswith(b"%PDF")

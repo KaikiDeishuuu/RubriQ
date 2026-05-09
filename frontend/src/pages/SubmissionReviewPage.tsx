@@ -11,6 +11,7 @@ import {
   getSubmission,
   overrideAnswer,
   processSubmission,
+  updateDeductionSummary,
 } from '../lib/api'
 import { confidenceTone, formatConfidence, formatScore, isSubmissionActive, toClassNames } from '../lib/format'
 import type { Answer, ConfidenceLevel, SubmissionDetail, SubmissionStatus } from '../lib/types'
@@ -28,6 +29,8 @@ export function SubmissionReviewPage() {
   const [exportingPdf, setExportingPdf] = useState(false)
   const [savingOverride, setSavingOverride] = useState(false)
   const [savingReviewFlag, setSavingReviewFlag] = useState(false)
+  const [deductionDraft, setDeductionDraft] = useState<string>('')
+  const [savingDeduction, setSavingDeduction] = useState(false)
   const loadingRef = useRef(false)
   const backgroundLoadingRef = useRef(false)
   const manualQuestionSelectionRef = useRef(false)
@@ -74,7 +77,9 @@ export function SubmissionReviewPage() {
         setLoading(true)
       }
       setError(null)
-      setSubmission(await getSubmission(numericSubmissionId))
+      const data = await getSubmission(numericSubmissionId)
+      setSubmission(data)
+      setDeductionDraft(data.deduction_summary ?? '')
     } catch (error) {
       setError(error instanceof Error ? error.message : '加载答卷失败')
     } finally {
@@ -82,6 +87,38 @@ export function SubmissionReviewPage() {
       if (!background) {
         setLoading(false)
       }
+    }
+  }
+
+  async function handleSaveDeduction() {
+    if (!submission) {
+      return
+    }
+    setSavingDeduction(true)
+    try {
+      const updated = await updateDeductionSummary(submission.id, { summary: deductionDraft })
+      setSubmission(updated)
+      setDeductionDraft(updated.deduction_summary ?? '')
+    } catch (error) {
+      setError(error instanceof Error ? error.message : '保存扣分摘要失败')
+    } finally {
+      setSavingDeduction(false)
+    }
+  }
+
+  async function handleResetDeduction() {
+    if (!submission) {
+      return
+    }
+    setSavingDeduction(true)
+    try {
+      const updated = await updateDeductionSummary(submission.id, { reset: true })
+      setSubmission(updated)
+      setDeductionDraft(updated.deduction_summary ?? '')
+    } catch (error) {
+      setError(error instanceof Error ? error.message : '恢复扣分摘要失败')
+    } finally {
+      setSavingDeduction(false)
     }
   }
 
@@ -227,6 +264,55 @@ export function SubmissionReviewPage() {
       {error ? <Message message={error} tone="error" /> : null}
       {submissionIsActive && submission ? <ProcessingWorkflow status={submission.status} /> : null}
       {splitLocked ? <Message message="该答卷来自批量上传，必须先在拆分预览页确认页段后才能开始批改。" tone="error" /> : null}
+
+      {submission ? (
+        <SectionCard
+          title="扣分摘要"
+          description="紧贴 rubric 自动生成，可编辑后导出 PDF 也将使用编辑后的版本。"
+          action={
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => void handleSaveDeduction()}
+                disabled={savingDeduction || (deductionDraft === (submission.deduction_summary ?? ''))}
+                className="rounded-full bg-ink-950 px-4 py-2 text-sm font-semibold text-paper transition hover:bg-ink-800 disabled:opacity-50"
+              >
+                {savingDeduction ? '保存中...' : '保存修改'}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleResetDeduction()}
+                disabled={savingDeduction || !submission.deduction_summary_edited}
+                className="rounded-full border border-ink-900/10 bg-white px-4 py-2 text-sm font-semibold text-ink-950 transition hover:bg-paper disabled:opacity-50"
+              >
+                恢复 AI 自动生成
+              </button>
+            </div>
+          }
+        >
+          <div className="space-y-3">
+            <div className="flex flex-wrap gap-2 text-xs">
+              <span
+                className={toClassNames(
+                  'rounded-full px-3 py-1 font-semibold ring-1 ring-inset',
+                  submission.deduction_summary_edited
+                    ? 'bg-gold-50 text-amber-800 ring-gold-200'
+                    : 'bg-paper text-ink-700 ring-ink-900/10',
+                )}
+              >
+                {submission.deduction_summary_edited ? '教师已编辑（重评不会覆盖）' : 'AI 自动生成（每次重评后自动刷新）'}
+              </span>
+            </div>
+            <textarea
+              value={deductionDraft}
+              onChange={(event) => setDeductionDraft(event.target.value)}
+              rows={Math.min(20, Math.max(6, deductionDraft.split('\n').length + 1))}
+              className="w-full rounded-2xl border border-ink-900/10 bg-white px-4 py-3 font-mono text-sm leading-6 text-ink-950 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
+              placeholder="例如：第 1 题（满分 5 分，得 3 分，扣 2 分） 单位错误，缺少例子。"
+            />
+          </div>
+        </SectionCard>
+      ) : null}
 
       {submission ? (
         <div className="grid gap-6 xl:grid-cols-[360px_minmax(0,1fr)]">

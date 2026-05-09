@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 import io
+import re
+import zipfile
 from datetime import datetime
 from decimal import Decimal
 from html import escape
@@ -200,6 +202,15 @@ def build_submission_review_pdf(session: Session, submission_id: int) -> bytes:
         ),
         Spacer(1, 10),
     ]
+    deduction_text = _resolve_deduction_summary(submission)
+    if deduction_text:
+        story.extend(
+            [
+                Paragraph(escape("扣分摘要" + ("（教师已编辑）" if submission.deduction_summary_edited else "")), styles["section"]),
+                _build_deduction_summary_block(deduction_text, styles),
+                Spacer(1, 10),
+            ]
+        )
     for question in questions:
         answer = answers_by_question_id.get(question.id)
         story.extend(_build_submission_question_section(question, answer, styles))
@@ -339,6 +350,36 @@ def _build_submission_summary_table(
                 ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#9ca3af")),
                 ("INNERGRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#d1d5db")),
                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ]
+        )
+    )
+    return table
+
+
+def _resolve_deduction_summary(submission: Submission) -> str:
+    """Return the teacher-edited summary if present, otherwise generate one on the fly."""
+
+    from app.services.pipeline import generate_deduction_summary
+
+    stored = (submission.deduction_summary or "").strip()
+    if stored:
+        return stored
+    return generate_deduction_summary(submission)
+
+
+def _build_deduction_summary_block(text: str, styles: dict[str, ParagraphStyle]) -> Table:
+    safe_html = escape(text).replace("\n", "<br/>")
+    paragraph = Paragraph(safe_html, styles["cell"])
+    table = Table([[paragraph]], colWidths=[A4[0] - 32 * mm])
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#fef3c7")),
+                ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#d97706")),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
                 ("TOPPADDING", (0, 0), (-1, -1), 6),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
             ]
@@ -664,6 +705,57 @@ def _load_submission_for_review_pdf(session: Session, submission_id: int) -> Sub
     if submission is None:
         raise ValueError(f"Submission {submission_id} not found")
     return submission
+
+
+_INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _safe_filename_segment(value: str | None, fallback: str) -> str:
+    cleaned = _INVALID_FILENAME_CHARS.sub("_", (value or "").strip())
+    cleaned = cleaned.strip(" .")
+    return cleaned or fallback
+
+
+def _submission_pdf_filename(submission: Submission) -> str:
+    student_id = _safe_filename_segment(submission.student_id, f"submission-{submission.id}")
+    student_name = _safe_filename_segment(submission.student_name, f"id-{submission.id}")
+    suffix = "" if submission.status in {"graded", "needs_review"} else "-未评分"
+    return f"{student_id}-{student_name}{suffix}.pdf"
+
+
+def build_exam_submissions_zip(session: Session, exam_id: int) -> tuple[bytes, int, int]:
+    """Bundle every submission's review PDF into one ZIP, returns (bytes, total, failures)."""
+
+    exam = _load_exam_for_results(session, exam_id)
+    buffer = io.BytesIO()
+    failure_count = 0
+    used_names: set[str] = set()
+    failure_log: list[str] = []
+    with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for submission in exam.submissions:
+            try:
+                pdf_bytes = build_submission_review_pdf(session, submission.id)
+            except Exception as exc:  # noqa: BLE001 - one bad PDF should not abort the whole archive
+                failure_count += 1
+                failure_log.append(
+                    f"submission_id={submission.id} student={submission.student_name or '-'} error={exc}"
+                )
+                continue
+            base_name = _submission_pdf_filename(submission)
+            name = base_name
+            disambiguator = 2
+            while name in used_names:
+                stem, ext = base_name.rsplit(".", 1) if "." in base_name else (base_name, "pdf")
+                name = f"{stem} ({disambiguator}).{ext}"
+                disambiguator += 1
+            used_names.add(name)
+            archive.writestr(name, pdf_bytes)
+        if failure_log:
+            archive.writestr(
+                "_失败列表.txt",
+                "下列答卷生成评分说明 PDF 失败，请到对应复核页面查看：\n\n" + "\n".join(failure_log),
+            )
+    return buffer.getvalue(), len(exam.submissions), failure_count
 
 
 def _load_exam_for_results(session: Session, exam_id: int) -> Exam:

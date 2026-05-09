@@ -7,6 +7,7 @@ import type {
   BatchUploadMode,
   BatchUploadResponse,
   ConfidenceLevel,
+  DeductionSummaryUpdatePayload,
   ExamCreatePayload,
   ExamDetail,
   ExamListItem,
@@ -258,6 +259,27 @@ export async function exportSubmissionPdf(submissionId: number): Promise<Blob> {
     throw new Error(await response.text())
   }
   return response.blob()
+}
+
+export async function exportExamSubmissionsZip(examId: number): Promise<Blob> {
+  const response = await fetch(`${API_BASE_URL}/exams/${examId}/export-submissions.zip`)
+  if (!response.ok) {
+    throw new Error(await response.text())
+  }
+  return response.blob()
+}
+
+export async function updateDeductionSummary(
+  submissionId: number,
+  payload: DeductionSummaryUpdatePayload,
+): Promise<SubmissionDetail> {
+  return request<SubmissionDetail>(`/submissions/${submissionId}/deduction-summary`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  })
 }
 
 export async function deleteExam(examId: number): Promise<void> {

@@ -9,8 +9,9 @@ from sqlalchemy.orm import Session
 from app.api.common import load_submission_detail, serialize_submission_detail
 from app.api.deps import get_db
 from app.models import Submission, SubmissionStatus
-from app.schemas.submission import ProcessResponse, SubmissionDetail
+from app.schemas.submission import DeductionSummaryUpdate, ProcessResponse, SubmissionDetail
 from app.services.export import build_submission_review_pdf
+from app.services.pipeline import PipelineError, set_teacher_deduction_summary
 from app.storage.local import get_storage_service
 from app.workers.tasks import process_submission_task
 
@@ -70,6 +71,20 @@ def start_submission_processing(submission_id: int, session: Session = Depends(g
     process_submission_task.delay(submission.id)
     session.refresh(submission)
     return ProcessResponse(submission_id=submission.id, status=submission.status)
+
+
+@router.put("/{submission_id}/deduction-summary", response_model=SubmissionDetail)
+def update_deduction_summary(
+    submission_id: int,
+    payload: DeductionSummaryUpdate,
+    session: Session = Depends(get_db),
+):
+    _load_submission_or_404(session, submission_id)
+    try:
+        set_teacher_deduction_summary(session, submission_id, payload.summary, reset=payload.reset)
+    except PipelineError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return serialize_submission_detail(load_submission_detail(session, submission_id))
 
 
 def _load_submission_or_404(session: Session, submission_id: int) -> Submission:

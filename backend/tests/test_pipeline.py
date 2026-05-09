@@ -5,7 +5,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db.base import Base
-from app.models import Answer, ConfidenceLevel, Exam, Question, Submission, SubmissionPage, SubmissionStatus
+from app.models import Answer, AnswerRubricResult, ConfidenceLevel, Exam, Question, RubricItem, Submission, SubmissionPage, SubmissionStatus
 from app.schemas.ai import ExtractedQuestion, RubricParseResult, StudentExtractionResult
 from app.services import pipeline
 from app.services.pipeline import (
@@ -75,7 +75,7 @@ def test_strictness_policy_does_not_lift_unsupported_non_empty_answer(monkeypatc
             model="model",
         )
 
-        assert attempt.score == Decimal("0.00")
+        assert attempt.score == Decimal("0.0")
         assert attempt.missing_rubric_evidence is True
 
 
@@ -92,7 +92,7 @@ def test_lenient_policy_applies_small_floor_only_with_evidence(monkeypatch) -> N
         model="model",
     )
 
-    assert attempt.score == Decimal("0.25")
+    assert attempt.score == Decimal("0.3")
 
 
 
@@ -109,7 +109,7 @@ def test_small_question_lenient_floor_is_bounded(monkeypatch) -> None:
         model="model",
     )
 
-    assert attempt.score == Decimal("0.05")
+    assert attempt.score == Decimal("0.1")
 
 
 
@@ -429,7 +429,7 @@ def test_process_submission_without_questions_marks_needs_review(monkeypatch) ->
         updated_submission = process_submission(session, submission.id)
 
         assert updated_submission.status == SubmissionStatus.needs_review.value
-        assert updated_submission.total_score == Decimal("0.00")
+        assert updated_submission.total_score == Decimal("0.0")
         assert updated_submission.error_message == "No gradable questions were found for this submission"
     finally:
         session.close()
@@ -513,3 +513,110 @@ def _question_snapshot() -> QuestionSnapshot:
             RubricItemSnapshot(id=11, description="Point B", max_score=Decimal("3")),
         ],
     )
+
+
+def test_generate_deduction_summary_lists_lost_rubric_items() -> None:
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+    session = SessionLocal()
+    try:
+        exam = Exam(title="模拟", total_score=Decimal("10"))
+        session.add(exam)
+        session.flush()
+        question = Question(exam_id=exam.id, question_no="1", title="说明能量守恒", max_score=Decimal("5"), order_index=0)
+        session.add(question)
+        session.flush()
+        rubric_item_a = RubricItem(question_id=question.id, description="给出公式", max_score=Decimal("2"), order_index=0)
+        rubric_item_b = RubricItem(question_id=question.id, description="给出例子", max_score=Decimal("3"), order_index=1)
+        session.add_all([rubric_item_a, rubric_item_b])
+        session.flush()
+        submission = Submission(
+            exam_id=exam.id,
+            student_name="张三",
+            student_id="S001",
+            original_pdf_path="submissions/s001.pdf",
+            status=SubmissionStatus.graded.value,
+            total_score=Decimal("3"),
+        )
+        session.add(submission)
+        session.flush()
+        answer = Answer(
+            submission_id=submission.id,
+            question_id=question.id,
+            extracted_answer="只列了公式",
+            score=Decimal("3"),
+            max_score=Decimal("5"),
+            confidence="medium",
+            ai_comment="缺少例子",
+            missing_points=["缺少例子"],
+        )
+        session.add(answer)
+        session.flush()
+        session.add_all(
+            [
+                AnswerRubricResult(answer_id=answer.id, rubric_item_id=rubric_item_a.id, awarded_score=Decimal("2"), evidence="写出公式", reason="公式正确"),
+                AnswerRubricResult(answer_id=answer.id, rubric_item_id=rubric_item_b.id, awarded_score=Decimal("1"), evidence="缺少例子", reason="未给具体例子，仅举了一个反例"),
+            ]
+        )
+        session.commit()
+        loaded = pipeline._load_submission(session, submission.id)
+
+        summary = pipeline.generate_deduction_summary(loaded)
+
+        assert "第 1 题" in summary
+        assert "扣 2" in summary
+        assert "给出例子" in summary
+        assert "公式" not in summary  # full-credit rubric items are skipped
+    finally:
+        session.close()
+
+
+def test_refresh_deduction_summary_respects_teacher_edit() -> None:
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+    session = SessionLocal()
+    try:
+        exam = Exam(title="模拟", total_score=Decimal("3"))
+        session.add(exam)
+        session.flush()
+        question = Question(exam_id=exam.id, question_no="1", title="题", max_score=Decimal("3"), order_index=0)
+        session.add(question)
+        session.flush()
+        submission = Submission(
+            exam_id=exam.id,
+            student_name="李四",
+            student_id="S002",
+            original_pdf_path="submissions/s002.pdf",
+            status=SubmissionStatus.graded.value,
+            total_score=Decimal("2"),
+        )
+        session.add(submission)
+        session.flush()
+        answer = Answer(
+            submission_id=submission.id,
+            question_id=question.id,
+            extracted_answer="部分答案",
+            score=Decimal("2"),
+            max_score=Decimal("3"),
+            confidence="medium",
+            ai_comment="差一点",
+            missing_points=[],
+        )
+        session.add(answer)
+        session.commit()
+
+        pipeline.set_teacher_deduction_summary(session, submission.id, "教师手写的说明", reset=False)
+        pipeline.refresh_deduction_summary(session, submission.id)
+        session.refresh(submission)
+
+        assert submission.deduction_summary == "教师手写的说明"
+        assert submission.deduction_summary_edited is True
+
+        pipeline.set_teacher_deduction_summary(session, submission.id, None, reset=True)
+        session.refresh(submission)
+        assert submission.deduction_summary_edited is False
+        assert submission.deduction_summary  # auto-generated string
+    finally:
+        session.close()
