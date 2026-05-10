@@ -4,10 +4,10 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
-from sqlalchemy import select
+from sqlalchemy import literal, select, union_all
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db
+from app.api.deps import get_db, require_admin_token
 from app.models import BatchPage, BatchSplitCandidate, ExamFile, Submission, SubmissionBatch, SubmissionPage
 from app.storage.local import get_storage_service
 
@@ -15,7 +15,11 @@ router = APIRouter(prefix="/storage", tags=["storage"])
 
 
 @router.get("/{file_path:path}")
-def read_storage_file(file_path: str, session: Session = Depends(get_db)):
+def read_storage_file(
+    file_path: str,
+    _: None = Depends(require_admin_token),
+    session: Session = Depends(get_db),
+):
     storage = get_storage_service()
     try:
         absolute_path = storage.path_for(file_path)
@@ -30,15 +34,13 @@ def read_storage_file(file_path: str, session: Session = Depends(get_db)):
 
 
 def _storage_path_is_referenced(session: Session, relative_path: str) -> bool:
-    columns = (
-        ExamFile.storage_path,
-        Submission.original_pdf_path,
-        SubmissionPage.image_path,
-        SubmissionBatch.source_storage_path,
-        BatchPage.image_path,
-        BatchSplitCandidate.source_storage_path,
-    )
-    for column in columns:
-        if session.execute(select(column).where(column == relative_path).limit(1)).first() is not None:
-            return True
-    return False
+    target = literal(relative_path)
+    stmt = union_all(
+        select(literal(1)).where(ExamFile.storage_path == target),
+        select(literal(1)).where(Submission.original_pdf_path == target),
+        select(literal(1)).where(SubmissionPage.image_path == target),
+        select(literal(1)).where(SubmissionBatch.source_storage_path == target),
+        select(literal(1)).where(BatchPage.image_path == target),
+        select(literal(1)).where(BatchSplitCandidate.source_storage_path == target),
+    ).limit(1)
+    return session.execute(stmt).first() is not None

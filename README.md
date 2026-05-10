@@ -65,6 +65,7 @@ docker compose up --build
 - `OCR_PREPROCESS_RUBRIC_ENABLED`
 - `OCR_PREPROCESS_STUDENT_ENABLED`
 - `OCR_PREPROCESS_SPLIT_HEADER_ENABLED`
+- `OCR_PREPROCESS_ROSTER_ENABLED`
 - `PADDLE_OCR_BASE_URL`
 - `PADDLE_OCR_API_KEY`
 - `PADDLE_OCR_MODEL`
@@ -83,6 +84,14 @@ docker compose up --build
 - `RENDER_DPI`
 - `CORS_ORIGINS`
 - `VITE_API_BASE_URL`
+- `ADMIN_API_TOKEN`
+- `ADMIN_API_TOKEN_REQUIRED`
+- `EXPORT_GLOBAL_CONCURRENCY`
+- `EXPORT_SUBMISSIONS_ZIP_MAX_SUBMISSIONS`
+- `SUBMISSIONS_UPLOAD_MAX_FILES`
+- `BATCH_ZIP_MAX_ENTRIES`
+- `BATCH_ZIP_MAX_UNCOMPRESSED_BYTES`
+- `AI_GRADING_BATCH_SIZE`
 
 `AI_VISION_*` is used for rubric parsing, student answer OCR, batch split header detection, and image-grounded grading review; `AI_GRADING_*` is used for text scoring. Chain variables are JSON arrays of ordered candidates, for example `[{"model":"gemini-2.5-pro","base_url":"https://generativelanguage.googleapis.com/v1beta/openai","api_key":"..."},{"model":"gpt-4o"}]`. Candidates may include `supports_vision`; image routes skip candidates with `supports_vision:false`. Task-specific chains override `AI_VISION_CHAIN`; if no chain is configured, the legacy single-model variables are used. Model-chain fallback happens before the existing business fallback that marks answers for human review.
 
@@ -108,6 +117,22 @@ docker compose up --build
 - `GET /api/exams/{exam_id}/results`
 - `GET /api/exams/{exam_id}/export.csv`
 - `GET /api/exams/{exam_id}/export.xlsx`
+- `GET /api/exams/{exam_id}/export-deductions.csv`
+- `GET /api/exams/{exam_id}/export-deductions.xlsx`
+- `GET /api/exams/{exam_id}/export-submissions.zip`
+- `GET /api/auth/check`
+- `GET /api/auth/status`
+
+## Authentication
+
+Set `ADMIN_API_TOKEN` to a secret string and `ADMIN_API_TOKEN_REQUIRED=true` to require a bearer token on every protected endpoint. The frontend has a built-in `/login` page that stores the token in `localStorage` and attaches `Authorization: Bearer <token>` to every request, including image fetches (which use blob URLs because browsers cannot send headers on `<img src>`). When `ADMIN_API_TOKEN_REQUIRED` is `false`, the login page detects this via `/api/auth/status` and redirects through automatically.
+
+## Operational limits
+
+- `SUBMISSIONS_UPLOAD_MAX_FILES` (default 20) caps a single submission upload request.
+- `BATCH_ZIP_MAX_ENTRIES` (default 300) and `BATCH_ZIP_MAX_UNCOMPRESSED_BYTES` (default 2 GiB) bound ZIP batch ingestion so a malicious archive can't fill disk.
+- `EXPORT_GLOBAL_CONCURRENCY` and `EXPORT_SUBMISSIONS_ZIP_MAX_SUBMISSIONS` bound expensive export endpoints; clients receive 429 / 413 when the cap is hit.
+- `AI_GRADING_BATCH_SIZE` controls how many submissions a batch grading run dispatches per chunk.
 
 ## Notes
 

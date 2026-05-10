@@ -4,7 +4,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { DropZone } from '../components/DropZone'
 import { ExamWizardSteps, WizardNav, emptyWizardStatus } from '../components/ExamWizard'
 import { SectionCard } from '../components/SectionCard'
-import { buildStorageUrl, confirmRubric, createRubricItem, deleteRubricItem, getExam, parseRubricPdf, reopenRubric, updateQuestion, updateRubricItem, uploadRubricPdf } from '../lib/api'
+import { confirmRubric, createRubricItem, deleteRubricItem, fetchStorageBlob, getExam, parseRubricPdf, reopenRubric, updateQuestion, updateRubricItem, uploadRubricPdf } from '../lib/api'
 import { formatScore, toClassNames } from '../lib/format'
 import type { ExamDetail, Question, RubricItem } from '../lib/types'
 
@@ -83,6 +83,26 @@ export function RubricReviewPage() {
 		}
 	}
 
+	async function handleOpenRubricFile(storagePath: string, originalFilename: string | null) {
+		setError(null)
+		try {
+			const blob = await fetchStorageBlob(storagePath)
+			const objectUrl = URL.createObjectURL(blob)
+			const newWindow = window.open(objectUrl, '_blank', 'noopener,noreferrer')
+			if (!newWindow) {
+				const link = document.createElement('a')
+				link.href = objectUrl
+				link.download = originalFilename || 'rubric.pdf'
+				document.body.appendChild(link)
+				link.click()
+				link.remove()
+			}
+			window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000)
+		} catch (err) {
+			setError(err instanceof Error ? err.message : '无法打开评分标准 PDF')
+		}
+	}
+
 	async function handleConfirmRubric(advance: boolean) {
 		if (!Number.isFinite(numericExamId)) {
 			return
@@ -120,16 +140,39 @@ export function RubricReviewPage() {
 		}
 	}
 
+	function parseNonNegativeNumber(value: FormDataEntryValue | null, label: string): number | null {
+		const parsed = Number(value)
+		if (!Number.isFinite(parsed) || parsed < 0) {
+			setError(`${label}必须是非负数字`)
+			return null
+		}
+		return parsed
+	}
+
+	function parseNonNegativeInteger(value: FormDataEntryValue | null, label: string): number | null {
+		const parsed = Number(value)
+		if (!Number.isInteger(parsed) || parsed < 0) {
+			setError(`${label}必须是非负整数`)
+			return null
+		}
+		return parsed
+	}
+
 	async function handleSaveQuestion(question: Question, event: FormEvent<HTMLFormElement>) {
 		event.preventDefault()
 		const formData = new FormData(event.currentTarget)
+		const maxScore = parseNonNegativeNumber(formData.get('max_score'), '题目满分')
+		const orderIndex = parseNonNegativeInteger(formData.get('order_index'), '题目排序')
+		if (maxScore === null || orderIndex === null) {
+			return
+		}
 		setBusy(true)
 		try {
 			await updateQuestion(question.id, {
 				question_no: String(formData.get('question_no') ?? question.question_no),
 				title: String(formData.get('title') ?? question.title),
-				max_score: Number(formData.get('max_score') ?? question.max_score),
-				order_index: Number(formData.get('order_index') ?? question.order_index),
+				max_score: maxScore,
+				order_index: orderIndex,
 			})
 			setFeedback(`题目 ${question.question_no} 已更新。`)
 			await loadExam()
@@ -143,13 +186,18 @@ export function RubricReviewPage() {
 	async function handleSaveRubricItem(questionId: number, item: RubricItem, event: FormEvent<HTMLFormElement>) {
 		event.preventDefault()
 		const formData = new FormData(event.currentTarget)
+		const maxScore = parseNonNegativeNumber(formData.get('max_score'), '评分项满分')
+		const orderIndex = parseNonNegativeInteger(formData.get('order_index'), '评分项排序')
+		if (maxScore === null || orderIndex === null) {
+			return
+		}
 		setBusy(true)
 		try {
 			await updateRubricItem(item.id, {
 				description: String(formData.get('description') ?? item.description),
-				max_score: Number(formData.get('max_score') ?? item.max_score),
+				max_score: maxScore,
 				keywords: parseKeywords(String(formData.get('keywords') ?? item.keywords.join(', '))),
-				order_index: Number(formData.get('order_index') ?? item.order_index),
+				order_index: orderIndex,
 			})
 			setFeedback('评分项已更新。')
 			await loadExam()
@@ -163,13 +211,18 @@ export function RubricReviewPage() {
 	async function handleCreateRubricItem(questionId: number, event: FormEvent<HTMLFormElement>) {
 		event.preventDefault()
 		const formData = new FormData(event.currentTarget)
+		const maxScore = parseNonNegativeNumber(formData.get('max_score'), '评分项满分')
+		const orderIndex = parseNonNegativeInteger(formData.get('order_index'), '评分项排序')
+		if (maxScore === null || orderIndex === null) {
+			return
+		}
 		setBusy(true)
 		try {
 			await createRubricItem(questionId, {
 				description: String(formData.get('description') ?? ''),
-				max_score: Number(formData.get('max_score') ?? 0),
+				max_score: maxScore,
 				keywords: parseKeywords(String(formData.get('keywords') ?? '')),
-				order_index: Number(formData.get('order_index') ?? 0),
+				order_index: orderIndex,
 			})
 			event.currentTarget.reset()
 			setFeedback('评分项已添加。')
@@ -287,14 +340,13 @@ export function RubricReviewPage() {
 							</button>
 						</div>
 						{latestRubricFile ? (
-							<a
-								href={buildStorageUrl(latestRubricFile.storage_path)}
-								target="_blank"
-								rel="noreferrer"
-								className="inline-flex rounded-full border border-ink-900/10 bg-white px-4 py-2 text-sm font-semibold text-ink-950 transition hover:bg-paper"
+							<button
+								type="button"
+								onClick={() => void handleOpenRubricFile(latestRubricFile.storage_path, latestRubricFile.original_filename)}
+								className="inline-flex cursor-pointer rounded-full border border-ink-900/10 bg-white px-4 py-2 text-sm font-semibold text-ink-950 transition hover:bg-paper"
 							>
 								打开最新评分标准 PDF
-							</a>
+							</button>
 						) : null}
 						<div className="rounded-2xl border border-ink-900/10 bg-white px-4 py-3 text-sm leading-6 text-ink-700">
 							解析完成后，请先检查并调整每道题和评分项，再处理学生答卷。

@@ -29,9 +29,70 @@ import type {
 } from './types'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000/api'
+const TOKEN_STORAGE_KEY = 'quizocr_admin_token'
+
+export class AuthRequiredError extends Error {
+  constructor(message = '未登录或登录已失效') {
+    super(message)
+    this.name = 'AuthRequiredError'
+  }
+}
+
+let _onAuthExpired: (() => void) | null = null
+
+export function setAdminToken(token: string | null): void {
+  try {
+    window.localStorage.removeItem(TOKEN_STORAGE_KEY)
+  } catch {}
+  try {
+    if (token) {
+      window.sessionStorage.setItem(TOKEN_STORAGE_KEY, token)
+    } else {
+      window.sessionStorage.removeItem(TOKEN_STORAGE_KEY)
+    }
+  } catch {}
+}
+
+export function getAdminToken(): string | null {
+  try {
+    window.localStorage.removeItem(TOKEN_STORAGE_KEY)
+  } catch {}
+  try {
+    return window.sessionStorage.getItem(TOKEN_STORAGE_KEY)
+  } catch {
+    return null
+  }
+}
+
+export function setAuthExpiredHandler(handler: (() => void) | null): void {
+  _onAuthExpired = handler
+}
+
+function applyAuthHeader(init: RequestInit): RequestInit {
+  const token = getAdminToken()
+  if (!token) {
+    return init
+  }
+  const headers = new Headers(init.headers ?? {})
+  if (!headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${token}`)
+  }
+  return { ...init, headers }
+}
+
+async function authedFetch(input: string, init: RequestInit = {}): Promise<Response> {
+  const response = await fetch(input, applyAuthHeader(init))
+  if (response.status === 401 || response.status === 403) {
+    if (_onAuthExpired) {
+      _onAuthExpired()
+    }
+    throw new AuthRequiredError()
+  }
+  return response
+}
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, init)
+  const response = await authedFetch(`${API_BASE_URL}${path}`, init)
   if (!response.ok) {
     const errorText = await response.text()
     throw new Error(errorText || response.statusText)
@@ -46,12 +107,43 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return (await response.text()) as T
 }
 
-export function buildStorageUrl(storagePath: string): string {
-  const encodedPath = storagePath
+async function fetchBlob(path: string): Promise<Blob> {
+  const response = await authedFetch(`${API_BASE_URL}${path}`)
+  if (!response.ok) {
+    throw new Error(await response.text())
+  }
+  return response.blob()
+}
+
+export async function fetchStorageBlob(storagePath: string): Promise<Blob> {
+  return fetchBlob(`/storage/${encodePath(storagePath)}`)
+}
+
+export async function checkAuthToken(): Promise<{ ok: boolean; auth_required: boolean }> {
+  return request<{ ok: boolean; auth_required: boolean }>('/auth/check')
+}
+
+export async function getAuthStatus(): Promise<{ auth_required: boolean }> {
+  const response = await fetch(`${API_BASE_URL}/auth/status`, applyAuthHeader({}))
+  if (!response.ok) {
+    throw new Error('无法读取认证状态')
+  }
+  return response.json()
+}
+
+function encodePath(storagePath: string): string {
+  return storagePath
     .split('/')
     .map((segment) => encodeURIComponent(segment))
     .join('/')
-  return `${API_BASE_URL}/storage/${encodedPath}`
+}
+
+/**
+ * @deprecated Browsers cannot send Authorization headers with `<img src>`.
+ * Use {@link fetchStorageBlob} + URL.createObjectURL or the AuthenticatedImage component.
+ */
+export function buildStorageUrl(storagePath: string): string {
+  return `${API_BASE_URL}/storage/${encodePath(storagePath)}`
 }
 
 export async function listExams(): Promise<ExamListItem[]> {
@@ -239,43 +331,31 @@ export async function getResults(examId: number): Promise<ExamResultsResponse> {
 }
 
 export async function exportResultsCsv(examId: number): Promise<Blob> {
-  const response = await fetch(`${API_BASE_URL}/exams/${examId}/export.csv`)
-  if (!response.ok) {
-    throw new Error(await response.text())
-  }
-  return response.blob()
+  return fetchBlob(`/exams/${examId}/export.csv`)
 }
 
 export async function exportResultsXlsx(examId: number): Promise<Blob> {
-  const response = await fetch(`${API_BASE_URL}/exams/${examId}/export.xlsx`)
-  if (!response.ok) {
-    throw new Error(await response.text())
-  }
-  return response.blob()
+  return fetchBlob(`/exams/${examId}/export.xlsx`)
 }
 
 export async function exportResultsPdf(examId: number): Promise<Blob> {
-  const response = await fetch(`${API_BASE_URL}/exams/${examId}/export.pdf`)
-  if (!response.ok) {
-    throw new Error(await response.text())
-  }
-  return response.blob()
+  return fetchBlob(`/exams/${examId}/export.pdf`)
 }
 
 export async function exportSubmissionPdf(submissionId: number): Promise<Blob> {
-  const response = await fetch(`${API_BASE_URL}/submissions/${submissionId}/export.pdf`)
-  if (!response.ok) {
-    throw new Error(await response.text())
-  }
-  return response.blob()
+  return fetchBlob(`/submissions/${submissionId}/export.pdf`)
 }
 
 export async function exportExamSubmissionsZip(examId: number): Promise<Blob> {
-  const response = await fetch(`${API_BASE_URL}/exams/${examId}/export-submissions.zip`)
-  if (!response.ok) {
-    throw new Error(await response.text())
-  }
-  return response.blob()
+  return fetchBlob(`/exams/${examId}/export-submissions.zip`)
+}
+
+export async function exportDeductionsCsv(examId: number): Promise<Blob> {
+  return fetchBlob(`/exams/${examId}/export-deductions.csv`)
+}
+
+export async function exportDeductionsXlsx(examId: number): Promise<Blob> {
+  return fetchBlob(`/exams/${examId}/export-deductions.xlsx`)
 }
 
 export async function updateDeductionSummary(

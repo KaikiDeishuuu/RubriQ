@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+import math
 from typing import Any
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from app.schemas.base import BaseSchema
 
@@ -45,7 +46,27 @@ class ExamFileRead(BaseSchema):
     updated_at: datetime
 
 
-class RubricItemBase(BaseSchema):
+class ScoreOrderValidationMixin(BaseSchema):
+    @field_validator("max_score", check_fields=False)
+    @classmethod
+    def _validate_max_score(cls, value: float | None) -> float | None:
+        if value is None:
+            return value
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("max_score must be a non-negative finite number")
+        return value
+
+    @field_validator("order_index", check_fields=False)
+    @classmethod
+    def _validate_order_index(cls, value: int | None) -> int | None:
+        if value is None:
+            return value
+        if value < 0:
+            raise ValueError("order_index must be non-negative")
+        return value
+
+
+class RubricItemBase(ScoreOrderValidationMixin):
     description: str
     max_score: float
     keywords: list[str] = Field(default_factory=list)
@@ -56,7 +77,7 @@ class RubricItemCreate(RubricItemBase):
     pass
 
 
-class RubricItemUpdate(BaseSchema):
+class RubricItemUpdate(ScoreOrderValidationMixin):
     description: str | None = None
     max_score: float | None = None
     keywords: list[str] | None = None
@@ -74,7 +95,7 @@ class RubricItemRead(BaseSchema):
     updated_at: datetime
 
 
-class QuestionBase(BaseSchema):
+class QuestionBase(ScoreOrderValidationMixin):
     question_no: str
     title: str
     max_score: float
@@ -85,7 +106,7 @@ class QuestionCreate(QuestionBase):
     pass
 
 
-class QuestionUpdate(BaseSchema):
+class QuestionUpdate(ScoreOrderValidationMixin):
     question_no: str | None = None
     title: str | None = None
     max_score: float | None = None

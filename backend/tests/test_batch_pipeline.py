@@ -892,3 +892,31 @@ def test_batch_variance_review_skips_teacher_reviewed_answers(session, monkeypat
     answer_ids = batch_pipeline._batch_variance_review_answer_ids(session, batch.id)
 
     assert answer_ids == [pending_answer.id]
+
+
+def test_batch_review_failure_stores_sanitized_error(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(batch_pipeline.settings, "ai_grading_review_enabled", True)
+    exam = _create_exam(session)
+    batch = SubmissionBatch(
+        exam_id=exam.id,
+        mode=BatchUploadMode.zip.value,
+        status=BatchStatus.completed.value,
+        source_filename="batch.zip",
+        source_storage_path="batch.zip",
+    )
+    session.add(batch)
+    session.commit()
+    monkeypatch.setattr(batch_pipeline, "_batch_variance_review_answer_ids", lambda *_args: [1])
+
+    def fail_review(*_args, **_kwargs):
+        raise RuntimeError("provider traceback leaked bearer secret-token")
+
+    monkeypatch.setattr(batch_pipeline, "review_answer_with_strong_model", fail_review)
+
+    with pytest.raises(RuntimeError):
+        batch_pipeline.review_batch_grading(session, batch.id)
+
+    stored_batch = session.get(SubmissionBatch, batch.id)
+    assert stored_batch.ai_review_status == "failed"
+    assert stored_batch.ai_review_error_message == "Batch grading review failed"
+    assert stored_batch.status == BatchStatus.completed_with_errors.value

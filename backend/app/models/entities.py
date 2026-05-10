@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from sqlalchemy import Boolean, Float, ForeignKey, Integer, JSON, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, JSON, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin
@@ -165,6 +165,8 @@ class Question(Base, TimestampMixin):
     title: Mapped[str] = mapped_column(Text, nullable=False)
     max_score: Mapped[Decimal] = mapped_column(Numeric(10, 2), nullable=False, default=Decimal("0"))
     order_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    __table_args__ = (Index("uq_questions_exam_question_no", exam_id, func.lower(question_no), unique=True),)
 
     exam: Mapped[Exam] = relationship(back_populates="questions")
     rubric_items: Mapped[list["RubricItem"]] = relationship(

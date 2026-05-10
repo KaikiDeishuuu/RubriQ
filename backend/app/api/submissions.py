@@ -7,12 +7,13 @@ from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from app.api.common import load_submission_detail, serialize_submission_detail
-from app.api.deps import get_db
+from app.api.deps import get_db, require_admin_token
 from app.models import Submission, SubmissionStatus
 from app.schemas.submission import DeductionSummaryUpdate, ProcessResponse, SubmissionDetail, TeacherFinalizedUpdate
-from app.services.export import build_submission_review_pdf
+from app.services.export import ExportBusyError, build_submission_review_pdf, export_slot
 from app.services.pipeline import PipelineError, set_teacher_deduction_summary
 from app.storage.local import get_storage_service
+from app.utils.errors import public_error_message
 from app.workers.tasks import process_submission_task
 
 logger = logging.getLogger(__name__)
@@ -32,17 +33,28 @@ STARTABLE_SUBMISSION_STATUSES = {
 
 
 @router.get("/{submission_id}", response_model=SubmissionDetail)
-def get_submission_detail(submission_id: int, session: Session = Depends(get_db)):
+def get_submission_detail(
+    submission_id: int,
+    _: None = Depends(require_admin_token),
+    session: Session = Depends(get_db),
+):
     submission = _load_submission_or_404(session, submission_id)
     return serialize_submission_detail(submission)
 
 
 @router.get("/{submission_id}/export.pdf")
-def export_submission_review_pdf(submission_id: int, session: Session = Depends(get_db)):
+def export_submission_review_pdf(
+    submission_id: int,
+    _: None = Depends(require_admin_token),
+    session: Session = Depends(get_db),
+):
     try:
-        pdf_bytes = build_submission_review_pdf(session, submission_id)
+        with export_slot():
+            pdf_bytes = build_submission_review_pdf(session, submission_id)
+    except ExportBusyError as exc:
+        raise HTTPException(status_code=429, detail=public_error_message(exc, "Submission request failed")) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=public_error_message(exc, "Submission request failed")) from exc
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
@@ -51,7 +63,11 @@ def export_submission_review_pdf(submission_id: int, session: Session = Depends(
 
 
 @router.post("/{submission_id}/process", response_model=ProcessResponse)
-def start_submission_processing(submission_id: int, session: Session = Depends(get_db)):
+def start_submission_processing(
+    submission_id: int,
+    _: None = Depends(require_admin_token),
+    session: Session = Depends(get_db),
+):
     submission = _load_submission_or_404(session, submission_id)
     if submission.batch_id is not None and not submission.split_confirmed:
         raise HTTPException(status_code=409, detail="Batch submission split must be confirmed before grading")
@@ -83,13 +99,14 @@ def start_submission_processing(submission_id: int, session: Session = Depends(g
 def update_deduction_summary(
     submission_id: int,
     payload: DeductionSummaryUpdate,
+    _: None = Depends(require_admin_token),
     session: Session = Depends(get_db),
 ):
     _load_submission_or_404(session, submission_id)
     try:
         set_teacher_deduction_summary(session, submission_id, payload.summary, reset=payload.reset)
     except PipelineError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=public_error_message(exc, "Submission request failed")) from exc
     return serialize_submission_detail(load_submission_detail(session, submission_id))
 
 
@@ -97,6 +114,7 @@ def update_deduction_summary(
 def update_teacher_finalized(
     submission_id: int,
     payload: TeacherFinalizedUpdate,
+    _: None = Depends(require_admin_token),
     session: Session = Depends(get_db),
 ):
     submission = _load_submission_or_404(session, submission_id)
@@ -109,11 +127,15 @@ def _load_submission_or_404(session: Session, submission_id: int) -> Submission:
     try:
         return load_submission_detail(session, submission_id)
     except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=public_error_message(exc, "Submission request failed")) from exc
 
 
 @router.delete("/{submission_id}")
-def delete_submission(submission_id: int, session: Session = Depends(get_db)):
+def delete_submission(
+    submission_id: int,
+    session: Session = Depends(get_db),
+    _: None = Depends(require_admin_token),
+):
     submission = _load_submission_or_404(session, submission_id)
     original_pdf_path = submission.original_pdf_path
     rendered_tree_path = f"rendered/submissions/{submission.id}"

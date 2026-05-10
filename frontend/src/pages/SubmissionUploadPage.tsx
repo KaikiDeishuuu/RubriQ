@@ -7,7 +7,6 @@ import { PreviewPanel } from '../components/PreviewPanel'
 import { SectionCard } from '../components/SectionCard'
 import { StatusBadge } from '../components/StatusBadge'
 import {
-  buildStorageUrl,
   confirmBatchSplit,
   getBatch,
   getResults,
@@ -296,15 +295,16 @@ export function SubmissionUploadPage() {
 
   const exam = results?.exam
   const selectedTab = BATCH_TABS.find((tab) => tab.mode === activeTab) ?? BATCH_TABS[0]
-  const batchPages = activeBatch?.pages.map((page) => ({ label: `Page ${page.page_no}`, url: buildStorageUrl(page.image_path) })) ?? []
+  const batchPages = activeBatch?.pages.map((page) => ({ label: `Page ${page.page_no}`, storagePath: page.image_path })) ?? []
   const activeCandidateDrafts = useMemo(() => candidateDrafts.filter((candidate) => !candidate.excluded), [candidateDrafts])
   const validationError = useMemo(() => validateCandidateDrafts(candidateDrafts, activeBatch?.total_pages ?? null), [candidateDrafts, activeBatch?.total_pages])
   const rubricDone = Boolean(exam && !exam.needs_rubric_review && exam.questions.length > 0)
   const rosterDone = Boolean(exam && exam.roster_status === 'confirmed')
   const batchReadyForGrading = activeBatch?.status === 'ready_for_grading' || activeBatch?.status === 'completed_with_errors'
-  const batchGradingDisabledReason = !rubricDone ? '请先确认评分标准' : !rosterDone ? '请先确认名单' : batchReadyForGrading ? null : '请先确认拆分'
+  const batchGradingDisabledReason = !rubricDone ? '请先确认评分标准' : !rosterDone ? '请先确认名单' : getBatchGradingStatusDisabledReason(activeBatch?.status, batchReadyForGrading)
   const canConfirmSplit = Boolean(activeBatch && activeCandidateDrafts.length > 0 && !validationError && activeCandidateDrafts.every((candidate) => candidate.confirmed && candidate.student_name && candidate.student_id))
-  const canStartBatchGrading = Boolean(activeBatch && !batchGradingDisabledReason)
+  const canStartBatchGrading = Boolean(activeBatch && batchReadyForGrading && !batchGradingDisabledReason)
+  const startBatchGradingLabel = getStartBatchGradingLabel(activeBatch?.status)
 
   return (
     <div className="space-y-6">
@@ -443,7 +443,7 @@ export function SubmissionUploadPage() {
               <div className="space-y-5">
                 <BatchSummary batch={activeBatch} />
                 {isBatchActive(activeBatch.status) ? <InlineMessage message="系统正在后台渲染或拆分，请稍候，页面会自动刷新。" /> : null}
-                {activeBatch.status !== 'ready_for_grading' && activeBatch.status !== 'grading' ? (
+                {!batchReadyForGrading && activeBatch.status !== 'grading' && activeBatch.status !== 'completed' ? (
                   <InlineMessage message="未完成拆分确认，不能开始 AI 评分。请确认每个候选页段和学生信息。" tone="warning" />
                 ) : null}
                 {batchGradingDisabledReason && batchReadyForGrading ? (
@@ -492,7 +492,7 @@ export function SubmissionUploadPage() {
                     title={batchGradingDisabledReason ?? undefined}
                     className="rounded-full border border-slateBlue-200 bg-slateBlue-50 px-5 py-3 text-sm font-semibold text-slateBlue-500 transition hover:bg-slateBlue-100 disabled:opacity-50"
                   >
-                    开始批改本批次
+                    {startBatchGradingLabel}
                   </button>
                 </div>
               </div>
@@ -901,6 +901,35 @@ function validateCandidateDrafts(candidates: BatchCandidateUpdatePayload[], tota
 
 function isBatchActive(status: BatchStatus): boolean {
   return ['uploaded', 'splitting', 'materializing', 'grading'].includes(status)
+}
+
+function getBatchGradingStatusDisabledReason(status: BatchStatus | undefined, readyForGrading: boolean): string | null {
+  if (readyForGrading) {
+    return null
+  }
+  if (status === 'grading') {
+    return '本批次正在批改中'
+  }
+  if (status === 'completed') {
+    return '本批次已完成批改'
+  }
+  if (status === 'failed') {
+    return '本批次拆分失败，请重新上传或修正后再试'
+  }
+  return '请先确认拆分'
+}
+
+function getStartBatchGradingLabel(status: BatchStatus | undefined): string {
+  if (status === 'grading') {
+    return '批改中'
+  }
+  if (status === 'completed') {
+    return '已完成批改'
+  }
+  if (status === 'completed_with_errors') {
+    return '继续批改可用答卷'
+  }
+  return '开始批改本批次'
 }
 
 function RosterStatusBar({ examId, status, entryCount }: { examId: number; status: RosterStatus; entryCount: number }) {

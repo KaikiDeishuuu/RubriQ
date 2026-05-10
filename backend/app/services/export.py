@@ -3,6 +3,8 @@ from __future__ import annotations
 import csv
 import io
 import re
+from collections import defaultdict
+from threading import BoundedSemaphore
 import zipfile
 from datetime import datetime
 from decimal import Decimal
@@ -21,8 +23,28 @@ from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, Tabl
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
+from app.core.config import settings
 from app.models import Answer, AnswerRubricResult, Exam, Question, RubricItem, Submission
 from app.services.pipeline import _to_decimal
+
+_EXPORT_SEMAPHORE = BoundedSemaphore(settings.export_global_concurrency)
+
+
+class ExportBusyError(RuntimeError):
+    pass
+
+
+class ExportLimitError(ValueError):
+    pass
+
+
+class export_slot:
+    def __enter__(self) -> None:
+        if not _EXPORT_SEMAPHORE.acquire(blocking=False):
+            raise ExportBusyError("Too many exports are running. Please try again later.")
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        _EXPORT_SEMAPHORE.release()
 
 
 def _effective_answer_score(answer: Answer) -> Decimal:
@@ -73,6 +95,102 @@ def build_exam_results_data(session: Session, exam_id: int) -> dict[str, Any]:
     }
 
 
+def build_exam_deductions_data(
+    session: Session,
+    exam_id: int,
+    *,
+    exam: Exam | None = None,
+) -> dict[str, Any]:
+    """Per-question deduction summary, used by PDF/CSV/XLSX exports.
+
+    Each question gets a list of student deductions (effective_score < max_score),
+    plus the rubric summary so teachers can see what was being measured.
+    """
+
+    if exam is None:
+        exam = _load_exam_for_results(session, exam_id)
+    questions = list(exam.questions)
+    answers_by_question: dict[int, list[tuple[Submission, Answer]]] = defaultdict(list)
+    for submission in exam.submissions:
+        for answer in submission.answers:
+            answers_by_question[answer.question_id].append((submission, answer))
+
+    per_question: list[dict[str, Any]] = []
+    for question in questions:
+        question_max = _to_decimal(question.max_score)
+        deductions: list[dict[str, Any]] = []
+        graded_count = 0
+        for submission, answer in answers_by_question.get(question.id, []):
+            answer_max = _to_decimal(answer.max_score) if answer.max_score else question_max
+            if answer_max <= 0:
+                continue
+            graded_count += 1
+            ai_score = _to_decimal(answer.score)
+            override = answer.teacher_override_score
+            override_decimal = _to_decimal(override) if override is not None else None
+            effective = override_decimal if override_decimal is not None else ai_score
+            if effective >= answer_max:
+                continue
+            deduction = _to_decimal(answer_max - effective)
+            missing_points = [str(point).strip() for point in (answer.missing_points or []) if str(point).strip()]
+            deductions.append(
+                {
+                    "submission_id": submission.id,
+                    "student_name": submission.student_name,
+                    "student_id": submission.student_id,
+                    "max_score": answer_max,
+                    "ai_score": ai_score,
+                    "teacher_override_score": override_decimal,
+                    "effective_score": effective,
+                    "deduction": deduction,
+                    "ai_comment": (answer.ai_comment or "").strip(),
+                    "missing_points": missing_points,
+                    "teacher_comment": (answer.teacher_comment or "").strip() or None,
+                    "needs_human_review": bool(answer.needs_human_review),
+                }
+            )
+        deductions.sort(
+            key=lambda item: (
+                (item["student_id"] or "").casefold(),
+                (item["student_name"] or "").casefold(),
+                item["submission_id"],
+            )
+        )
+        per_question.append(
+            {
+                "question": question,
+                "rubric_summary": _rubric_summary_text(question),
+                "graded_count": graded_count,
+                "deduction_count": len(deductions),
+                "deductions": deductions,
+            }
+        )
+    return {"exam": exam, "questions": questions, "per_question": per_question}
+
+
+def _rubric_summary_text(question: Question) -> str:
+    items = list(question.rubric_items)
+    if not items:
+        return ""
+    fragments: list[str] = []
+    for item in items:
+        description = (item.description or "").strip()
+        if not description:
+            continue
+        fragments.append(f"{description}({_format_score(item.max_score)})")
+    return " / ".join(fragments)
+
+
+def _short_deduction_reason(deduction: dict[str, Any]) -> str:
+    if deduction["teacher_comment"]:
+        return f"教师：{deduction['teacher_comment']}"
+    if deduction["missing_points"]:
+        return "；".join(deduction["missing_points"])
+    if deduction["ai_comment"]:
+        return deduction["ai_comment"]
+    return "未提供原因"
+
+
 def build_exam_results_csv(session: Session, exam_id: int) -> str:
     data = build_exam_results_data(session, exam_id)
     questions = data["questions"]
@@ -96,10 +214,13 @@ def build_exam_results_csv(session: Session, exam_id: int) -> str:
                 row["student_name"] or "",
                 row["student_id"] or "",
                 row["status"],
-                row["total_score"],
+                _format_score_value_for_export(row["total_score"]),
                 "yes" if row["needs_human_review"] else "no",
             ]
-            + [question_scores.get(question.question_no, 0.0) for question in questions]
+            + [
+                _format_question_score_for_export(question_scores, question.question_no)
+                for question in questions
+            ]
         )
     return buffer.getvalue()
 
@@ -128,11 +249,117 @@ def build_exam_results_xlsx(session: Session, exam_id: int) -> bytes:
                 row["student_name"],
                 row["student_id"],
                 row["status"],
-                row["total_score"],
+                _format_score_value_for_export(row["total_score"]),
                 row["needs_human_review"],
             ]
-            + [question_scores.get(question.question_no, 0.0) for question in questions]
+            + [
+                _format_question_score_for_export(question_scores, question.question_no)
+                for question in questions
+            ]
         )
+    output = io.BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
+_DEDUCTIONS_HEADER = [
+    "question_no",
+    "question_title",
+    "max_score",
+    "rubric_summary",
+    "student_id",
+    "student_name",
+    "submission_id",
+    "ai_score",
+    "teacher_override_score",
+    "effective_score",
+    "deduction",
+    "ai_comment",
+    "missing_points",
+    "teacher_comment",
+    "needs_human_review",
+]
+
+
+def _format_decimal_for_export(value: Decimal | None) -> str:
+    if value is None:
+        return ""
+    return _format_score(value)
+
+
+def _format_score_value_for_export(value: Any) -> str:
+    """Render a numeric score using the canonical Decimal formatting.
+
+    Accepts the float-shaped values stored in `build_exam_results_data`
+    rows so CSV / XLSX exports stay byte-identical to PDF totals.
+    """
+
+    if value is None:
+        return ""
+    return _format_score(_to_decimal(value))
+
+
+def _format_question_score_for_export(
+    question_scores: dict[str, Any],
+    question_no: str,
+) -> str:
+    if question_no not in question_scores:
+        return "0"
+    value = question_scores[question_no]
+    return _format_score(_to_decimal(value))
+
+
+def _iter_deduction_export_rows(
+    per_question: list[dict[str, Any]],
+) -> list[list[Any]]:
+    rows: list[list[Any]] = []
+    for entry in per_question:
+        question = entry["question"]
+        question_title = (question.title or "").strip()
+        rubric_summary = entry["rubric_summary"]
+        for deduction in entry["deductions"]:
+            rows.append(
+                [
+                    question.question_no,
+                    question_title,
+                    _format_decimal_for_export(_to_decimal(question.max_score)),
+                    rubric_summary,
+                    deduction["student_id"] or "",
+                    deduction["student_name"] or "",
+                    deduction["submission_id"],
+                    _format_decimal_for_export(deduction["ai_score"]),
+                    _format_decimal_for_export(deduction["teacher_override_score"]),
+                    _format_decimal_for_export(deduction["effective_score"]),
+                    _format_decimal_for_export(deduction["deduction"]),
+                    deduction["ai_comment"],
+                    "；".join(deduction["missing_points"]),
+                    deduction["teacher_comment"] or "",
+                    "yes" if deduction["needs_human_review"] else "no",
+                ]
+            )
+    return rows
+
+
+def build_exam_deductions_csv(session: Session, exam_id: int) -> str:
+    data = build_exam_deductions_data(session, exam_id)
+    buffer = io.StringIO()
+    # BOM keeps Excel happy when opening UTF-8 CSV with Chinese text.
+    buffer.write("﻿")
+    writer = csv.writer(buffer)
+    writer.writerow(_DEDUCTIONS_HEADER)
+    for row in _iter_deduction_export_rows(data["per_question"]):
+        writer.writerow(row)
+    return buffer.getvalue()
+
+
+def build_exam_deductions_xlsx(session: Session, exam_id: int) -> bytes:
+    data = build_exam_deductions_data(session, exam_id)
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Deductions"
+    worksheet.append(_DEDUCTIONS_HEADER)
+    for row in _iter_deduction_export_rows(data["per_question"]):
+        worksheet.append(row)
     output = io.BytesIO()
     workbook.save(output)
     return output.getvalue()
@@ -167,6 +394,9 @@ def build_exam_results_pdf(session: Session, exam_id: int) -> bytes:
         story.append(_build_pdf_result_table(rows, question_chunk, questions, styles))
         if index < len(question_chunks):
             story.append(Spacer(1, 10))
+    if questions:
+        deductions_data = build_exam_deductions_data(session, exam_id, exam=data["exam"])
+        story.extend(_build_deductions_pdf_section(deductions_data["per_question"], styles))
     document.build(story)
     return output.getvalue()
 
@@ -555,6 +785,9 @@ def format_review_trigger(trigger: str) -> str:
         "missing_rubric_evidence": "评分项证据不足",
         "score_variance": "同题分差较大",
         "score_delta": "快慢模型分差较大",
+        "non_empty_low_score": "作答有内容但分极低",
+        "sparse_answer_high_score": "作答稀少但分偏高",
+        "thin_rubric_evidence_high_score": "高分但证据极薄弱",
     }.get(trigger, trigger)
 
 
@@ -652,6 +885,71 @@ def _build_pdf_result_table(
     table = Table(table_data, repeatRows=1, colWidths=_pdf_column_widths(len(questions)))
     table.setStyle(TableStyle(_pdf_table_style_commands(len(table_data))))
     return table
+
+
+def _build_deductions_pdf_section(
+    per_question: list[dict[str, Any]],
+    styles: dict[str, ParagraphStyle],
+) -> list[Any]:
+    flowables: list[Any] = [
+        Spacer(1, 14),
+        Paragraph(escape("扣分明细汇总"), styles["section"]),
+        Paragraph(
+            escape("仅列出最终得分低于满分的同学，按学号排序。教师调整列出现时表示已被人工覆盖。"),
+            styles["cell"],
+        ),
+        Spacer(1, 6),
+    ]
+    available_width = landscape(A4)[0] - 24 * mm
+    col_widths = [
+        28 * mm,  # 学生
+        26 * mm,  # 学号
+        22 * mm,  # 得/满
+        16 * mm,  # 扣
+        18 * mm,  # 教师调整
+        available_width - (28 + 26 + 22 + 16 + 18) * mm,  # 扣分原因
+    ]
+    for entry in per_question:
+        question = entry["question"]
+        question_max = _to_decimal(question.max_score)
+        title_line = (
+            f"{question.question_no}：{(question.title or '').strip()}"
+            f"（满分 {_format_score(question_max)}，{entry['deduction_count']}/{entry['graded_count']} 人扣分）"
+        )
+        flowables.append(Spacer(1, 8))
+        flowables.append(Paragraph(escape(title_line), styles["section"]))
+        if entry["rubric_summary"]:
+            flowables.append(Paragraph(escape(f"评分要点：{entry['rubric_summary']}"), styles["cell"]))
+        if not entry["deductions"]:
+            flowables.append(Paragraph(escape("无扣分。"), styles["cell"]))
+            continue
+        header = ["学生", "学号", "得/满", "扣分", "教师调整", "扣分原因"]
+        table_data: list[list[Any]] = [[_pdf_cell(value, styles["header"]) for value in header]]
+        for deduction in entry["deductions"]:
+            override = deduction["teacher_override_score"]
+            if override is None:
+                override_label = "-"
+            else:
+                delta = override - deduction["ai_score"]
+                sign = "+" if delta >= 0 else "-"
+                override_label = f"{_format_score(override)} ({sign}{_format_score(abs(delta))})"
+            table_data.append(
+                [
+                    _pdf_cell(deduction["student_name"] or "未填写", styles["cell"]),
+                    _pdf_cell(deduction["student_id"] or "-", styles["cell"]),
+                    _pdf_cell(
+                        _format_score_pair(deduction["effective_score"], deduction["max_score"]),
+                        styles["center"],
+                    ),
+                    _pdf_cell(f"-{_format_score(deduction['deduction'])}", styles["center"]),
+                    _pdf_cell(override_label, styles["center"]),
+                    _pdf_cell(_short_deduction_reason(deduction), styles["cell"]),
+                ]
+            )
+        table = Table(table_data, repeatRows=1, colWidths=col_widths)
+        table.setStyle(TableStyle(_pdf_table_style_commands(len(table_data))))
+        flowables.append(table)
+    return flowables
 
 
 def _pdf_table_style_commands(row_count: int) -> list[tuple[Any, ...]]:
@@ -764,6 +1062,10 @@ def build_exam_submissions_zip(session: Session, exam_id: int) -> tuple[bytes, i
     """Bundle every submission's review PDF into one ZIP, returns (bytes, total, failures)."""
 
     exam = _load_exam_for_results(session, exam_id)
+    if len(exam.submissions) > settings.export_submissions_zip_max_submissions:
+        raise ExportLimitError(
+            f"Submission ZIP export is limited to {settings.export_submissions_zip_max_submissions} submissions"
+        )
     buffer = io.BytesIO()
     failure_count = 0
     used_names: set[str] = set()

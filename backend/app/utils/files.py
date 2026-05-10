@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 
 from fastapi import UploadFile
+from fastapi import HTTPException
 
 PDF_SIGNATURE = b"%PDF-"
 FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -12,12 +13,12 @@ FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 def sanitize_filename(filename: str, default_stem: str = "file") -> str:
     clean_name = Path(filename).name.strip()
     if not clean_name:
-        return f"{default_stem}.pdf"
+        return default_stem
     stem = Path(clean_name).stem or default_stem
-    suffix = Path(clean_name).suffix or ".pdf"
+    suffix = Path(clean_name).suffix
     stem = FILENAME_RE.sub("_", stem).strip("._") or default_stem
-    suffix = ".pdf" if suffix.lower() != ".pdf" else ".pdf"
-    return f"{stem}{suffix}"
+    suffix = FILENAME_RE.sub("", suffix)
+    return f"{stem}{suffix}" if suffix else stem
 
 
 async def validate_pdf_upload(upload_file: UploadFile) -> None:
@@ -27,6 +28,25 @@ async def validate_pdf_upload(upload_file: UploadFile) -> None:
     await upload_file.seek(0)
     if head != PDF_SIGNATURE:
         raise ValueError("Uploaded file is not a valid PDF.")
+
+
+async def read_upload_limited(
+    upload_file: UploadFile,
+    max_bytes: int,
+    *,
+    too_large_detail: str,
+    chunk_size: int = 1024 * 1024,
+) -> bytes:
+    data = bytearray()
+    while True:
+        chunk = await upload_file.read(chunk_size)
+        if not chunk:
+            break
+        data.extend(chunk)
+        if len(data) > max_bytes:
+            raise HTTPException(status_code=413, detail=too_large_detail)
+    await upload_file.seek(0)
+    return bytes(data)
 
 
 def ensure_pdf_suffix(filename: str) -> str:

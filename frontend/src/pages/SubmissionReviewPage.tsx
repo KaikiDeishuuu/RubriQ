@@ -5,7 +5,6 @@ import { PreviewPanel } from '../components/PreviewPanel'
 import { SectionCard } from '../components/SectionCard'
 import { StatusBadge } from '../components/StatusBadge'
 import {
-  buildStorageUrl,
   downloadBlob,
   exportSubmissionPdf,
   getSubmission,
@@ -32,12 +31,16 @@ export function SubmissionReviewPage() {
   const [savingReviewFlag, setSavingReviewFlag] = useState(false)
   const [savingTeacherFinalized, setSavingTeacherFinalized] = useState(false)
   const [deductionDraft, setDeductionDraft] = useState<string>('')
+  const [deductionDraftDirty, setDeductionDraftDirty] = useState(false)
   const [savingDeduction, setSavingDeduction] = useState(false)
+  const deductionDraftDirtyRef = useRef(false)
   const loadingRef = useRef(false)
   const backgroundLoadingRef = useRef(false)
   const manualQuestionSelectionRef = useRef(false)
 
   useEffect(() => {
+    deductionDraftDirtyRef.current = false
+    setDeductionDraftDirty(false)
     void loadSubmission()
   }, [numericSubmissionId])
 
@@ -81,7 +84,11 @@ export function SubmissionReviewPage() {
       setError(null)
       const data = await getSubmission(numericSubmissionId)
       setSubmission(data)
-      setDeductionDraft(data.deduction_summary ?? '')
+      if (!background || !deductionDraftDirtyRef.current) {
+        setDeductionDraft(data.deduction_summary ?? '')
+        deductionDraftDirtyRef.current = false
+        setDeductionDraftDirty(false)
+      }
     } catch (error) {
       setError(error instanceof Error ? error.message : '加载答卷失败')
     } finally {
@@ -101,6 +108,8 @@ export function SubmissionReviewPage() {
       const updated = await updateDeductionSummary(submission.id, { summary: deductionDraft })
       setSubmission(updated)
       setDeductionDraft(updated.deduction_summary ?? '')
+      deductionDraftDirtyRef.current = false
+      setDeductionDraftDirty(false)
     } catch (error) {
       setError(error instanceof Error ? error.message : '保存扣分摘要失败')
     } finally {
@@ -117,6 +126,8 @@ export function SubmissionReviewPage() {
       const updated = await updateDeductionSummary(submission.id, { reset: true })
       setSubmission(updated)
       setDeductionDraft(updated.deduction_summary ?? '')
+      deductionDraftDirtyRef.current = false
+      setDeductionDraftDirty(false)
     } catch (error) {
       setError(error instanceof Error ? error.message : '恢复扣分摘要失败')
     } finally {
@@ -204,7 +215,7 @@ export function SubmissionReviewPage() {
   const pages =
     submission?.pages.map((page) => ({
       label: `Page ${page.page_no}`,
-      url: buildStorageUrl(page.image_path),
+      storagePath: page.image_path,
     })) ?? []
   const answerByQuestion = new Map(submission?.answers.map((answer) => [answer.question_id, answer]) ?? [])
   const activeQuestion =
@@ -335,10 +346,19 @@ export function SubmissionReviewPage() {
               >
                 {submission.deduction_summary_edited ? '教师已编辑（重评不会覆盖）' : 'AI 自动生成（每次重评后自动刷新）'}
               </span>
+              {deductionDraftDirty ? (
+                <span className="rounded-full bg-amber-50 px-3 py-1 font-semibold text-amber-800 ring-1 ring-inset ring-amber-200">
+                  有未保存修改，后台刷新不会覆盖
+                </span>
+              ) : null}
             </div>
             <textarea
               value={deductionDraft}
-              onChange={(event) => setDeductionDraft(event.target.value)}
+              onChange={(event) => {
+                setDeductionDraft(event.target.value)
+                deductionDraftDirtyRef.current = true
+                setDeductionDraftDirty(true)
+              }}
               rows={Math.min(20, Math.max(6, deductionDraft.split('\n').length + 1))}
               className="w-full rounded-2xl border border-ink-900/10 bg-white px-4 py-3 font-mono text-sm leading-6 text-ink-950 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
               placeholder="例如：第 1 题（满分 5 分，得 3 分，扣 2 分） 单位错误，缺少例子。"

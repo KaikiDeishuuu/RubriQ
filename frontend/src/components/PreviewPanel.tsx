@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react'
 
+import { AuthenticatedImage } from './AuthenticatedImage'
 import { toClassNames } from '../lib/format'
 
 interface PreviewPanelProps {
   title: string
   description?: string
-  pages: Array<{ label: string; url: string }>
+  pages: Array<{ label: string; storagePath: string }>
   activeIndex: number
   onChange: (index: number) => void
 }
@@ -69,7 +70,7 @@ export function PreviewPanel({ title, description, pages, activeIndex, onChange 
             }}
             className="overflow-hidden rounded-2xl border border-ink-900/10 bg-parchment text-left transition hover:shadow-lift"
           >
-            <img src={activePage.url} alt={activePage.label} className="h-[72vh] w-full object-contain" />
+            <AuthenticatedImage storagePath={activePage.storagePath} alt={activePage.label} className="h-[72vh] w-full object-contain" wrapperStyle={{ height: '72vh' }} />
             <div className="border-t border-ink-900/10 bg-white/80 px-4 py-2 text-center text-xs font-semibold text-ink-700">
               点击放大查看
             </div>
@@ -87,7 +88,7 @@ export function PreviewPanel({ title, description, pages, activeIndex, onChange 
                     : 'border-ink-900/10 bg-white/80 hover:-translate-y-0.5 hover:shadow-soft',
                 )}
               >
-                <img src={page.url} alt={page.label} className="h-28 w-full object-cover" />
+                <AuthenticatedImage storagePath={page.storagePath} alt={page.label} className="h-28 w-full object-cover" wrapperStyle={{ height: '7rem' }} />
                 <div className="px-3 py-2 text-xs font-semibold text-ink-700">{page.label}</div>
               </button>
             ))}
@@ -160,8 +161,8 @@ export function PreviewPanel({ title, description, pages, activeIndex, onChange 
                 </>
               ) : null}
               <div className="flex min-h-full items-start justify-center">
-                <img
-                  src={activePage.url}
+                <AuthenticatedImage
+                  storagePath={activePage.storagePath}
                   alt={activePage.label}
                   className="origin-top rounded-xl shadow-soft transition-transform"
                   style={{ transform: `scale(${zoom})` }}

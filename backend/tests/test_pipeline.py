@@ -236,6 +236,114 @@ def test_grade_question_uses_grading_route(monkeypatch) -> None:
     assert seen_route_keys == ["grading"]
 
 
+def test_review_triggers_include_formula_and_low_score_risks(monkeypatch) -> None:
+    question = _question_snapshot()
+    monkeypatch.setattr(pipeline.settings, "ai_grading_review_low_score_ratio", 0.25)
+    monkeypatch.setattr(pipeline.settings, "ai_grading_review_formula_force_review", True)
+    monkeypatch.setattr(pipeline.settings, "ai_grading_review_zero_score_force_review", True)
+    zero_attempt = pipeline._build_grading_attempt(
+        question=question,
+        answer_text="x^2 + 2x = 0",
+        extraction_confidence=ConfidenceLevel.high,
+        grading_result=_grading_result(score=0, evidence=""),
+        raw_response="{}",
+        model="model",
+    )
+
+    triggers = pipeline._review_triggers_for_attempt(
+        zero_attempt,
+        max_score=question.max_score,
+        answer_text="x^2 + 2x = 0",
+    )
+
+    assert "zero_score_non_empty" in triggers
+    assert "formula_like_answer" in triggers
+    assert "ocr_vision_mismatch_suspected" in triggers
+
+    low_attempt = pipeline._build_grading_attempt(
+        question=question,
+        answer_text="代入公式计算得到结果",
+        extraction_confidence=ConfidenceLevel.high,
+        grading_result=_grading_result(score=1, evidence="代入公式"),
+        raw_response="{}",
+        model="model",
+    )
+
+    low_triggers = pipeline._review_triggers_for_attempt(
+        low_attempt,
+        max_score=question.max_score,
+        answer_text="代入公式计算得到结果",
+    )
+
+    assert "low_score_non_empty" in low_triggers
+    assert "non_empty_low_score" in low_triggers
+
+
+def test_build_review_input_includes_image_review_hints() -> None:
+    question = _question_snapshot()
+    attempt = pipeline._build_grading_attempt(
+        question=question,
+        answer_text="x^2 + 2x = 0",
+        extraction_confidence=ConfidenceLevel.high,
+        grading_result=_grading_result(score=1, evidence="x^2 + 2x = 0"),
+        raw_response="{}",
+        model="model",
+    )
+
+    payload = pipeline._build_review_input(
+        question,
+        "x^2 + 2x = 0",
+        attempt,
+        review_triggers=["formula_like_answer", "low_score_non_empty"],
+    )
+
+    assert payload["answer_text_length"] == len("x^2 + 2x = 0")
+    assert payload["formula_like_hint"] is True
+    assert payload["fast_pass_score_ratio"] == 0.2
+    assert payload["review_trigger_hints"] == ["formula_like_answer", "low_score_non_empty"]
+
+
+def test_grade_question_uses_image_review_for_non_empty_zero_score(monkeypatch) -> None:
+    question = _question_snapshot()
+    image_path = Path("page.png")
+    seen_route_keys: list[str | None] = []
+    seen_review_payloads: list[dict] = []
+
+    def fake_call_structured_json(**kwargs):
+        seen_route_keys.append(kwargs.get("route_key"))
+        if kwargs.get("route_key") == "vision_grading_review":
+            seen_review_payloads.append(kwargs["prompt_variables"]["grading_input_json"])
+        score = 0 if kwargs.get("route_key") == "grading" else 2
+        return type(
+            "Completion",
+            (),
+            {
+                "data": _grading_result(score=score, evidence="x^2 + 2x = 0"),
+                "raw_text": "{}",
+                "model": "chosen-model",
+            },
+        )()
+
+    monkeypatch.setattr(pipeline.settings, "ai_grading_review_enabled", True)
+    monkeypatch.setattr(pipeline.settings, "ai_grading_review_zero_score_force_review", True)
+    monkeypatch.setattr(pipeline, "call_structured_json", fake_call_structured_json)
+
+    answer, _rubric_results, _needs_review = pipeline._grade_question(
+        submission_id=7,
+        question=question,
+        answer_text="x^2 + 2x = 0",
+        source_page=1,
+        extraction_confidence=ConfidenceLevel.high,
+        review_image_paths=[image_path],
+    )
+
+    assert answer.review_decision == "accepted_review"
+    assert "zero_score_non_empty" in answer.review_triggers
+    assert "formula_like_answer" in answer.review_triggers
+    assert seen_route_keys == ["grading", "vision_grading_review"]
+    assert '"review_trigger_hints"' in seen_review_payloads[0]
+
+
 def test_grade_question_uses_image_grounded_review_before_text_review(monkeypatch) -> None:
     question = _question_snapshot()
     image_path = Path("page.png")
@@ -810,3 +918,167 @@ def test_confirm_rubric_endpoint_rejects_when_no_questions(tmp_path) -> None:
             app.dependency_overrides.clear()
     finally:
         session.close()
+
+
+def test_apply_teacher_override_rejects_when_review_in_progress() -> None:
+    import pytest
+
+    from app.services.pipeline import PipelineConflictError, apply_teacher_override
+
+    engine = create_engine("sqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine, future=True)
+    session = SessionLocal()
+    try:
+        exam = Exam(title="并发", total_score=Decimal("3"))
+        session.add(exam)
+        session.flush()
+        question = Question(exam_id=exam.id, question_no="1", title="题", max_score=Decimal("3"), order_index=0)
+        session.add(question)
+        session.flush()
+        submission = Submission(
+            exam_id=exam.id,
+            original_pdf_path="submissions/x.pdf",
+            status=SubmissionStatus.graded.value,
+            total_score=Decimal("2"),
+        )
+        session.add(submission)
+        session.flush()
+        answer = Answer(
+            submission_id=submission.id,
+            question_id=question.id,
+            extracted_answer="部分作答",
+            score=Decimal("2"),
+            max_score=Decimal("3"),
+            confidence="medium",
+            review_decision="in_progress",
+        )
+        session.add(answer)
+        session.commit()
+
+        with pytest.raises(PipelineConflictError):
+            apply_teacher_override(
+                session,
+                answer.id,
+                teacher_override_score=2.5,
+            )
+
+        # The lock state must remain untouched so the worker can still finish.
+        session.refresh(answer)
+        assert answer.review_decision == "in_progress"
+        assert answer.teacher_override_score is None
+    finally:
+        session.close()
+
+
+def _build_test_attempt(*, score: Decimal, evidence: str = "学生明确写出了关键概念", reason: str = "依据充分") -> object:
+    """Construct a minimal GradingAttempt-shape object for trigger logic tests."""
+
+    from app.services.pipeline import GradingAttempt
+
+    return GradingAttempt(
+        score=score,
+        confidence=ConfidenceLevel.high,
+        ai_comment="",
+        missing_points=[],
+        raw_response="",
+        rubric_results=[
+            AnswerRubricResult(
+                rubric_item_id=1,
+                awarded_score=score,
+                evidence=evidence,
+                reason=reason,
+            )
+        ],
+        needs_human_review=False,
+        model="x",
+        model_requested_review=False,
+        missing_rubric_evidence=False,
+    )
+
+
+def test_review_triggers_flag_sparse_answer_with_high_score() -> None:
+    from app.services.pipeline import _review_triggers_for_attempt
+
+    attempt = _build_test_attempt(score=Decimal("8"))
+    triggers = _review_triggers_for_attempt(attempt, max_score=Decimal("10"), answer_text="嗯。")
+
+    assert "sparse_answer_high_score" in triggers
+
+
+def test_review_triggers_flag_thin_evidence_with_high_score() -> None:
+    from app.services.pipeline import _review_triggers_for_attempt
+
+    attempt = _build_test_attempt(score=Decimal("8"), evidence="是", reason="见图")
+    triggers = _review_triggers_for_attempt(
+        attempt,
+        max_score=Decimal("10"),
+        answer_text="学生写了若干句符合题意的内容，长度足够避开 sparse_answer_high_score 触发。",
+    )
+
+    assert "thin_rubric_evidence_high_score" in triggers
+    assert "sparse_answer_high_score" not in triggers
+
+
+def test_review_triggers_skip_when_score_low() -> None:
+    from app.services.pipeline import _review_triggers_for_attempt
+
+    attempt = _build_test_attempt(score=Decimal("2"), evidence="", reason="见图")
+    triggers = _review_triggers_for_attempt(attempt, max_score=Decimal("10"), answer_text="abc")
+
+    # Sparse + low score still falls under non_empty_low_score, but not under
+    # the new "high score" triggers.
+    assert "sparse_answer_high_score" not in triggers
+    assert "thin_rubric_evidence_high_score" not in triggers
+
+
+def test_build_review_input_includes_fast_pass_evaluation() -> None:
+    from app.services.pipeline import GradingAttempt, QuestionSnapshot, RubricItemSnapshot, _build_review_input
+
+    question = QuestionSnapshot(
+        id=1,
+        question_no="1",
+        title="解释概念",
+        max_score=Decimal("10"),
+        rubric_items=[
+            RubricItemSnapshot(id=11, description="说明耦合剂作用", max_score=Decimal("5")),
+        ],
+    )
+    fast = GradingAttempt(
+        score=Decimal("4"),
+        confidence=ConfidenceLevel.medium,
+        ai_comment="只覆盖了部分要点。",
+        missing_points=["未提及声阻抗"],
+        raw_response="",
+        rubric_results=[
+            AnswerRubricResult(
+                rubric_item_id=11,
+                awarded_score=Decimal("4"),
+                evidence="减少反射",
+                reason="提到了减少反射",
+            )
+        ],
+        needs_human_review=False,
+        model="fast-model",
+        model_requested_review=False,
+        missing_rubric_evidence=False,
+    )
+
+    payload = _build_review_input(question, "学生答案文本", fast)
+
+    assert "fast_pass_evaluation" in payload
+    fast_payload = payload["fast_pass_evaluation"]
+    assert fast_payload["score"] == 4.0
+    assert fast_payload["confidence"] == "medium"
+    assert fast_payload["rubric_evaluation"][0]["evidence"] == "减少反射"
+    assert fast_payload["missing_points"] == ["未提及声阻抗"]
+
+
+def test_build_review_input_omits_fast_pass_when_none() -> None:
+    from app.services.pipeline import QuestionSnapshot, _build_review_input
+
+    question = QuestionSnapshot(
+        id=1, question_no="1", title="题", max_score=Decimal("5"), rubric_items=[],
+    )
+    payload = _build_review_input(question, "answer", None)
+    assert "fast_pass_evaluation" not in payload

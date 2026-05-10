@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import Response
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.orm import Session, selectinload
 
 from app.api.common import (
@@ -17,9 +17,9 @@ from app.api.common import (
     serialize_exam_list_item,
     serialize_question,
 )
-from app.api.deps import get_db
+from app.api.deps import get_db, require_admin_token
 from app.core.config import settings
-from app.models import Exam, ExamFile, RubricItem, Submission
+from app.models import Exam, ExamFile, Question, RubricItem, Submission
 from app.schemas.exam import (
     ExamCreate,
     ExamDetail,
@@ -32,15 +32,21 @@ from app.schemas.exam import (
 )
 from app.schemas.submission import PageUploadResponse, SubmissionUploadResponse, SubmissionSummary
 from app.services.export import (
+    ExportBusyError,
+    ExportLimitError,
+    build_exam_deductions_csv,
+    build_exam_deductions_xlsx,
     build_exam_results_csv,
     build_exam_results_data,
     build_exam_results_pdf,
     build_exam_results_xlsx,
     build_exam_submissions_zip,
+    export_slot,
 )
 from app.services.pipeline import PipelineError, _to_decimal, parse_rubric_for_exam
 from app.storage.local import get_storage_service
-from app.utils.files import validate_pdf_upload
+from app.utils.errors import public_error_message
+from app.utils.files import read_upload_limited, validate_pdf_upload
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +54,11 @@ router = APIRouter(prefix="/exams", tags=["exams"])
 
 
 @router.post("", response_model=ExamDetail)
-def create_exam(payload: ExamCreate, session: Session = Depends(get_db)):
+def create_exam(
+    payload: ExamCreate,
+    _: None = Depends(require_admin_token),
+    session: Session = Depends(get_db),
+):
     exam = Exam(title=payload.title, description=payload.description)
     session.add(exam)
     session.commit()
@@ -56,7 +66,10 @@ def create_exam(payload: ExamCreate, session: Session = Depends(get_db)):
 
 
 @router.get("", response_model=list[ExamListItem])
-def list_exams(session: Session = Depends(get_db)):
+def list_exams(
+    _: None = Depends(require_admin_token),
+    session: Session = Depends(get_db),
+):
     stmt = select(Exam).options(selectinload(Exam.questions), selectinload(Exam.submissions))
     exams = session.execute(stmt).scalars().all()
     response: list[ExamListItem] = []
@@ -72,7 +85,11 @@ def list_exams(session: Session = Depends(get_db)):
 
 
 @router.get("/{exam_id}", response_model=ExamDetail)
-def get_exam_detail(exam_id: int, session: Session = Depends(get_db)):
+def get_exam_detail(
+    exam_id: int,
+    _: None = Depends(require_admin_token),
+    session: Session = Depends(get_db),
+):
     exam = _load_exam_or_404(session, exam_id)
     return serialize_exam_detail(exam)
 
@@ -81,13 +98,16 @@ def get_exam_detail(exam_id: int, session: Session = Depends(get_db)):
 async def upload_rubric_pdf(
     exam_id: int,
     file: UploadFile = File(...),
+    _: None = Depends(require_admin_token),
     session: Session = Depends(get_db),
 ):
     exam = _load_exam_or_404(session, exam_id)
     await _validate_pdf_upload_or_400(file)
-    data = await file.read()
-    if len(data) > settings.max_upload_bytes:
-        raise HTTPException(status_code=413, detail="Uploaded rubric PDF is too large")
+    data = await read_upload_limited(
+        file,
+        settings.max_upload_bytes,
+        too_large_detail="Uploaded rubric PDF is too large",
+    )
     storage = get_storage_service()
     stored = storage.save_bytes(storage.unique_pdf_path(f"exams/{exam.id}/rubric", file.filename or "rubric.pdf"), data)
     exam_file = ExamFile(
@@ -111,17 +131,22 @@ async def upload_rubric_pdf(
 def parse_rubric(
     exam_id: int,
     exam_file_id: int | None = Query(default=None),
+    _: None = Depends(require_admin_token),
     session: Session = Depends(get_db),
 ):
     try:
         exam = parse_rubric_for_exam(session, exam_id, exam_file_id=exam_file_id)
     except PipelineError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=public_error_message(exc, "Request failed")) from exc
     return serialize_exam_detail(exam)
 
 
 @router.post("/{exam_id}/rubric/confirm", response_model=ExamDetail)
-def confirm_rubric(exam_id: int, session: Session = Depends(get_db)):
+def confirm_rubric(
+    exam_id: int,
+    _: None = Depends(require_admin_token),
+    session: Session = Depends(get_db),
+):
     exam = _load_exam_or_404(session, exam_id)
     if not exam.questions:
         raise HTTPException(status_code=400, detail="请先解析评分标准并至少保留一道题再确认")
@@ -131,7 +156,11 @@ def confirm_rubric(exam_id: int, session: Session = Depends(get_db)):
 
 
 @router.post("/{exam_id}/rubric/reopen", response_model=ExamDetail)
-def reopen_rubric(exam_id: int, session: Session = Depends(get_db)):
+def reopen_rubric(
+    exam_id: int,
+    _: None = Depends(require_admin_token),
+    session: Session = Depends(get_db),
+):
     exam = _load_exam_or_404(session, exam_id)
     exam.needs_rubric_review = True
     session.commit()
@@ -139,16 +168,37 @@ def reopen_rubric(exam_id: int, session: Session = Depends(get_db)):
 
 
 @router.get("/{exam_id}/questions", response_model=list[QuestionRead])
-def list_questions(exam_id: int, session: Session = Depends(get_db)):
+def list_questions(
+    exam_id: int,
+    _: None = Depends(require_admin_token),
+    session: Session = Depends(get_db),
+):
     exam = _load_exam_or_404(session, exam_id)
     return [serialize_question(question) for question in exam.questions]
 
 
 @router.put("/questions/{question_id}", response_model=QuestionRead)
-def update_question(question_id: int, payload: QuestionUpdate, session: Session = Depends(get_db)):
+def update_question(
+    question_id: int,
+    payload: QuestionUpdate,
+    _: None = Depends(require_admin_token),
+    session: Session = Depends(get_db),
+):
     question = load_question_detail(session, question_id)
     if payload.question_no is not None:
-        question.question_no = payload.question_no
+        normalized_question_no = payload.question_no.strip()
+        if not normalized_question_no:
+            raise HTTPException(status_code=400, detail="Question number cannot be empty")
+        duplicate = session.execute(
+            select(Question.id).where(
+                Question.exam_id == question.exam_id,
+                func.lower(Question.question_no) == normalized_question_no.lower(),
+                Question.id != question.id,
+            )
+        ).scalar_one_or_none()
+        if duplicate is not None:
+            raise HTTPException(status_code=409, detail="Question number already exists in this exam")
+        question.question_no = normalized_question_no
     if payload.title is not None:
         question.title = payload.title
     if payload.max_score is not None:
@@ -164,6 +214,7 @@ def update_question(question_id: int, payload: QuestionUpdate, session: Session 
 def create_rubric_item(
     question_id: int,
     payload: RubricItemCreate,
+    _: None = Depends(require_admin_token),
     session: Session = Depends(get_db),
 ):
     question = load_question_detail(session, question_id)
@@ -186,6 +237,7 @@ def create_rubric_item(
 def update_rubric_item(
     item_id: int,
     payload: RubricItemUpdate,
+    _: None = Depends(require_admin_token),
     session: Session = Depends(get_db),
 ):
     rubric_item = _load_rubric_item_or_404(session, item_id)
@@ -203,7 +255,11 @@ def update_rubric_item(
 
 
 @router.delete("/rubric-items/{item_id}")
-def delete_rubric_item(item_id: int, session: Session = Depends(get_db)):
+def delete_rubric_item(
+    item_id: int,
+    _: None = Depends(require_admin_token),
+    session: Session = Depends(get_db),
+):
     rubric_item = _load_rubric_item_or_404(session, item_id)
     question_id = rubric_item.question_id
     session.delete(rubric_item)
@@ -217,16 +273,24 @@ async def upload_submissions(
     files: list[UploadFile] = File(...),
     student_name: str | None = Form(default=None),
     student_id: str | None = Form(default=None),
+    _: None = Depends(require_admin_token),
     session: Session = Depends(get_db),
 ):
     exam = _load_exam_or_404(session, exam_id)
+    if len(files) > settings.submissions_upload_max_files:
+        raise HTTPException(
+            status_code=400,
+            detail=f"一次最多上传 {settings.submissions_upload_max_files} 份答卷，请分批上传。",
+        )
     storage = get_storage_service()
     created_submissions: list[SubmissionSummary] = []
     for file in files:
         await _validate_pdf_upload_or_400(file)
-        data = await file.read()
-        if len(data) > settings.max_upload_bytes:
-            raise HTTPException(status_code=413, detail="Uploaded submission PDF is too large")
+        data = await read_upload_limited(
+            file,
+            settings.max_upload_bytes,
+            too_large_detail="Uploaded submission PDF is too large",
+        )
         stored = storage.save_bytes(
             storage.unique_pdf_path(f"exams/{exam.id}/submissions", file.filename or "submission.pdf"),
             data,
@@ -247,7 +311,11 @@ async def upload_submissions(
 
 
 @router.get("/{exam_id}/results", response_model=ExamResultsResponse)
-def get_exam_results(exam_id: int, session: Session = Depends(get_db)):
+def get_exam_results(
+    exam_id: int,
+    _: None = Depends(require_admin_token),
+    session: Session = Depends(get_db),
+):
     from app.schemas.exam import ExamDetail, ExamResultRow, QuestionRead
 
     data = build_exam_results_data(session, exam_id)
@@ -264,8 +332,16 @@ def get_exam_results(exam_id: int, session: Session = Depends(get_db)):
 
 
 @router.get("/{exam_id}/export.csv")
-def export_exam_results_csv(exam_id: int, session: Session = Depends(get_db)):
-    csv_content = build_exam_results_csv(session, exam_id)
+def export_exam_results_csv(
+    exam_id: int,
+    _: None = Depends(require_admin_token),
+    session: Session = Depends(get_db),
+):
+    try:
+        with export_slot():
+            csv_content = build_exam_results_csv(session, exam_id)
+    except ExportBusyError as exc:
+        raise HTTPException(status_code=429, detail=public_error_message(exc, "Request failed")) from exc
     return Response(
         content=csv_content,
         media_type="text/csv; charset=utf-8",
@@ -274,8 +350,16 @@ def export_exam_results_csv(exam_id: int, session: Session = Depends(get_db)):
 
 
 @router.get("/{exam_id}/export.xlsx")
-def export_exam_results_xlsx(exam_id: int, session: Session = Depends(get_db)):
-    xlsx_bytes = build_exam_results_xlsx(session, exam_id)
+def export_exam_results_xlsx(
+    exam_id: int,
+    _: None = Depends(require_admin_token),
+    session: Session = Depends(get_db),
+):
+    try:
+        with export_slot():
+            xlsx_bytes = build_exam_results_xlsx(session, exam_id)
+    except ExportBusyError as exc:
+        raise HTTPException(status_code=429, detail=public_error_message(exc, "Request failed")) from exc
     return Response(
         content=xlsx_bytes,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -284,8 +368,16 @@ def export_exam_results_xlsx(exam_id: int, session: Session = Depends(get_db)):
 
 
 @router.get("/{exam_id}/export.pdf")
-def export_exam_results_pdf(exam_id: int, session: Session = Depends(get_db)):
-    pdf_bytes = build_exam_results_pdf(session, exam_id)
+def export_exam_results_pdf(
+    exam_id: int,
+    _: None = Depends(require_admin_token),
+    session: Session = Depends(get_db),
+):
+    try:
+        with export_slot():
+            pdf_bytes = build_exam_results_pdf(session, exam_id)
+    except ExportBusyError as exc:
+        raise HTTPException(status_code=429, detail=public_error_message(exc, "Request failed")) from exc
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
@@ -293,10 +385,58 @@ def export_exam_results_pdf(exam_id: int, session: Session = Depends(get_db)):
     )
 
 
+@router.get("/{exam_id}/export-deductions.csv")
+def export_exam_deductions_csv(
+    exam_id: int,
+    _: None = Depends(require_admin_token),
+    session: Session = Depends(get_db),
+):
+    _load_exam_or_404(session, exam_id)
+    try:
+        with export_slot():
+            csv_content = build_exam_deductions_csv(session, exam_id)
+    except ExportBusyError as exc:
+        raise HTTPException(status_code=429, detail=public_error_message(exc, "Request failed")) from exc
+    return Response(
+        content=csv_content,
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="exam-{exam_id}-deductions.csv"'},
+    )
+
+
+@router.get("/{exam_id}/export-deductions.xlsx")
+def export_exam_deductions_xlsx(
+    exam_id: int,
+    _: None = Depends(require_admin_token),
+    session: Session = Depends(get_db),
+):
+    _load_exam_or_404(session, exam_id)
+    try:
+        with export_slot():
+            xlsx_bytes = build_exam_deductions_xlsx(session, exam_id)
+    except ExportBusyError as exc:
+        raise HTTPException(status_code=429, detail=public_error_message(exc, "Request failed")) from exc
+    return Response(
+        content=xlsx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="exam-{exam_id}-deductions.xlsx"'},
+    )
+
+
 @router.get("/{exam_id}/export-submissions.zip")
-def export_exam_submissions_zip(exam_id: int, session: Session = Depends(get_db)):
+def export_exam_submissions_zip(
+    exam_id: int,
+    _: None = Depends(require_admin_token),
+    session: Session = Depends(get_db),
+):
     exam = _load_exam_or_404(session, exam_id)
-    zip_bytes, total, failure_count = build_exam_submissions_zip(session, exam_id)
+    try:
+        with export_slot():
+            zip_bytes, total, failure_count = build_exam_submissions_zip(session, exam_id)
+    except ExportBusyError as exc:
+        raise HTTPException(status_code=429, detail=public_error_message(exc, "Request failed")) from exc
+    except ExportLimitError as exc:
+        raise HTTPException(status_code=413, detail=public_error_message(exc, "Request failed")) from exc
     from urllib.parse import quote
 
     safe_title = (exam.title or f"exam-{exam_id}").strip() or f"exam-{exam_id}"
@@ -317,11 +457,15 @@ def _load_exam_or_404(session: Session, exam_id: int) -> Exam:
     try:
         return load_exam_detail(session, exam_id)
     except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=public_error_message(exc, "Request failed")) from exc
 
 
 @router.delete("/{exam_id}")
-def delete_exam(exam_id: int, session: Session = Depends(get_db)):
+def delete_exam(
+    exam_id: int,
+    session: Session = Depends(get_db),
+    _: None = Depends(require_admin_token),
+):
     exam = _load_exam_or_404(session, exam_id)
     file_paths = [exam_file.storage_path for exam_file in exam.files]
     tree_paths = [f"rendered/exams/{exam.id}"]
@@ -345,7 +489,12 @@ def delete_exam(exam_id: int, session: Session = Depends(get_db)):
 
 
 @router.delete("/{exam_id}/rubric/files/{file_id}")
-def delete_rubric_file(exam_id: int, file_id: int, session: Session = Depends(get_db)):
+def delete_rubric_file(
+    exam_id: int,
+    file_id: int,
+    _: None = Depends(require_admin_token),
+    session: Session = Depends(get_db),
+):
     exam = _load_exam_or_404(session, exam_id)
     rubric_file = session.get(ExamFile, file_id)
     if rubric_file is None or rubric_file.exam_id != exam_id:
@@ -378,7 +527,7 @@ async def _validate_pdf_upload_or_400(file: UploadFile) -> None:
     try:
         await validate_pdf_upload(file)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=public_error_message(exc, "Request failed")) from exc
 
 
 def _dedupe_storage_paths(paths: list[str]) -> list[str]:

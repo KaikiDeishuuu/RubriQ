@@ -38,6 +38,7 @@ from app.services.roster import (
     match_roster_identity,
 )
 from app.storage.local import get_storage_service
+from app.utils.errors import sanitized_error_summary
 from app.utils.files import PDF_SIGNATURE, sanitize_filename
 
 logger = logging.getLogger(__name__)
@@ -158,8 +159,9 @@ def prepare_batch_split(session: Session, batch_id: int) -> SubmissionBatch:
         else:
             raise BatchPipelineError(f"Unsupported batch mode {batch.mode}")
     except Exception as exc:
+        logger.exception("Batch split preparation failed batch_id=%s", batch.id)
         batch.status = BatchStatus.failed.value
-        batch.error_message = str(exc)
+        batch.error_message = sanitized_error_summary(exc, "Batch split preparation failed")
         session.commit()
         raise
     return load_batch_detail(session, batch.id)
@@ -265,7 +267,7 @@ def confirm_batch_split(session: Session, batch_id: int) -> BatchConfirmResult:
                 candidate.error_message = None
                 created_count += 1
             except Exception as exc:
-                candidate.error_message = str(exc)
+                candidate.error_message = sanitized_error_summary(exc, "Candidate materialization failed")
                 failed_count += 1
             session.flush()
     else:
@@ -277,7 +279,7 @@ def confirm_batch_split(session: Session, batch_id: int) -> BatchConfirmResult:
             split_paths = split_pdf_pages(source_path, page_ranges, output_dir)
         except Exception as exc:
             batch.status = BatchStatus.failed.value
-            batch.error_message = str(exc)
+            batch.error_message = sanitized_error_summary(exc, "Batch processing failed")
             session.commit()
             raise BatchPipelineError(f"Failed to split combined PDF: {exc}") from exc
         for candidate, split_path in zip(active_candidates, split_paths, strict=True):
@@ -296,7 +298,7 @@ def confirm_batch_split(session: Session, batch_id: int) -> BatchConfirmResult:
                 candidate.error_message = None
                 created_count += 1
             except Exception as exc:
-                candidate.error_message = str(exc)
+                candidate.error_message = sanitized_error_summary(exc, "Candidate materialization failed")
                 failed_count += 1
             session.flush()
 
@@ -444,9 +446,10 @@ def review_batch_grading(session: Session, batch_id: int) -> SubmissionBatch:
         batch.status = _terminal_batch_status(batch)
         session.commit()
     except Exception as exc:
+        logger.exception("Batch grading review failed batch_id=%s", batch_id)
         batch = load_batch_detail(session, batch_id)
         batch.ai_review_status = "failed"
-        batch.ai_review_error_message = str(exc)
+        batch.ai_review_error_message = sanitized_error_summary(exc, "Batch grading review failed")
         batch.status = BatchStatus.completed_with_errors.value
         session.commit()
         raise
@@ -519,15 +522,41 @@ def _prepare_zip_batch(session: Session, batch: SubmissionBatch) -> None:
     roster_index = build_roster_index(session, batch.exam_id)
     candidate_count = 0
     failed_count = 0
+    pdf_entry_count = 0
+    cumulative_uncompressed_bytes = 0
+    per_entry_max_bytes = settings.max_upload_bytes
+    total_max_bytes = settings.batch_zip_max_uncompressed_bytes
+    max_entries = settings.batch_zip_max_entries
     with zipfile.ZipFile(zip_path) as archive:
         for info in archive.infolist():
             if info.is_dir() or not info.filename.lower().endswith(".pdf"):
                 continue
+            pdf_entry_count += 1
+            if pdf_entry_count > max_entries:
+                raise BatchPipelineError(
+                    f"ZIP archive contains more than {max_entries} PDF entries"
+                )
             if _zip_entry_escapes(info.filename):
                 candidate_count += 1
                 _add_failed_candidate(session, batch, candidate_count, info.filename, "ZIP entry path is not allowed")
                 failed_count += 1
                 continue
+            if info.file_size > per_entry_max_bytes:
+                candidate_count += 1
+                _add_failed_candidate(
+                    session,
+                    batch,
+                    candidate_count,
+                    PurePosixPath(info.filename).name,
+                    f"ZIP entry exceeds the {per_entry_max_bytes // (1024 * 1024)} MiB per-file limit",
+                )
+                failed_count += 1
+                continue
+            cumulative_uncompressed_bytes += info.file_size
+            if cumulative_uncompressed_bytes > total_max_bytes:
+                raise BatchPipelineError(
+                    "ZIP archive uncompressed size exceeds the configured limit"
+                )
             candidate_count += 1
             original_name = PurePosixPath(info.filename).name
             try:

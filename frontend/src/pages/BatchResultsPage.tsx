@@ -4,6 +4,8 @@ import { Link, useParams } from 'react-router-dom'
 import {
   deleteSubmission,
   downloadBlob,
+  exportDeductionsCsv,
+  exportDeductionsXlsx,
   exportExamSubmissionsZip,
   exportResultsCsv,
   exportResultsPdf,
@@ -17,7 +19,7 @@ import { ExamWizardSteps, WizardNav, emptyWizardStatus } from '../components/Exa
 import { SectionCard } from '../components/SectionCard'
 import { StatusBadge } from '../components/StatusBadge'
 
-type ExportFormat = 'csv' | 'xlsx' | 'pdf' | 'zip'
+type ExportFormat = 'csv' | 'xlsx' | 'pdf' | 'zip' | 'deductions-csv' | 'deductions-xlsx'
 
 async function exportResults(format: ExportFormat, examId: number): Promise<Blob> {
   if (format === 'csv') {
@@ -28,6 +30,12 @@ async function exportResults(format: ExportFormat, examId: number): Promise<Blob
   }
   if (format === 'zip') {
     return exportExamSubmissionsZip(examId)
+  }
+  if (format === 'deductions-csv') {
+    return exportDeductionsCsv(examId)
+  }
+  if (format === 'deductions-xlsx') {
+    return exportDeductionsXlsx(examId)
   }
   return exportResultsPdf(examId)
 }
@@ -113,9 +121,17 @@ export function BatchResultsPage() {
     try {
       const blob = await exportResults(format, numericExamId)
       const examTitle = (data?.exam.title ?? '').trim()
-      const filename = format === 'zip'
-        ? `${sanitizeFilename(examTitle) || `exam-${numericExamId}`}-评分说明.zip`
-        : `exam-${numericExamId}-results.${format}`
+      const titleStem = sanitizeFilename(examTitle) || `exam-${numericExamId}`
+      let filename: string
+      if (format === 'zip') {
+        filename = `${titleStem}-评分说明.zip`
+      } else if (format === 'deductions-csv') {
+        filename = `${titleStem}-扣分明细.csv`
+      } else if (format === 'deductions-xlsx') {
+        filename = `${titleStem}-扣分明细.xlsx`
+      } else {
+        filename = `exam-${numericExamId}-results.${format}`
+      }
       await downloadBlob(blob, filename)
     } catch (error) {
       setError(error instanceof Error ? error.message : '导出结果失败')
@@ -189,6 +205,22 @@ export function BatchResultsPage() {
               className="rounded-full border border-sage-200 bg-sage-50 px-4 py-2 text-sm font-semibold text-sage-500 transition hover:bg-sage-100 disabled:opacity-50"
             >
               {exporting === 'zip' ? '正在打包评分说明...' : '批量导出评分说明 ZIP'}
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleExport('deductions-csv')}
+              disabled={exporting !== null}
+              className="rounded-full border border-amber-200 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-700 transition hover:bg-amber-100 disabled:opacity-50"
+            >
+              {exporting === 'deductions-csv' ? '正在导出扣分明细 CSV...' : '导出扣分明细 CSV'}
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleExport('deductions-xlsx')}
+              disabled={exporting !== null}
+              className="rounded-full border border-amber-200 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-700 transition hover:bg-amber-100 disabled:opacity-50"
+            >
+              {exporting === 'deductions-xlsx' ? '正在导出扣分明细 Excel...' : '导出扣分明细 Excel'}
             </button>
           </div>
         }

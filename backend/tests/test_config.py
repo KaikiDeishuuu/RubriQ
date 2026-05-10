@@ -40,6 +40,11 @@ def test_ai_and_render_settings_exist() -> None:
     assert settings.ai_retry_backoff_seconds >= 0
     assert 1 <= settings.ai_grading_concurrency <= 6
     assert 1 <= settings.ai_grading_global_concurrency <= 8
+    assert 1 <= settings.export_global_concurrency <= 8
+    assert settings.export_submissions_zip_max_submissions >= 1
+    assert 0 <= settings.ai_grading_review_low_score_ratio <= 1
+    assert settings.ai_grading_review_formula_force_review is True
+    assert settings.ai_grading_review_zero_score_force_review is True
     assert 1 <= settings.ocr_split_header_concurrency <= 8
 
 
@@ -157,6 +162,8 @@ def test_ai_model_candidates_parse_review_chain() -> None:
 def test_invalid_review_thresholds_are_rejected() -> None:
     with pytest.raises(ValidationError, match="AI grading review ratios"):
         _settings(AI_GRADING_REVIEW_SCORE_DELTA_RATIO=1.5)
+    with pytest.raises(ValidationError, match="AI grading review ratios"):
+        _settings(AI_GRADING_REVIEW_LOW_SCORE_RATIO=-0.1)
     with pytest.raises(ValidationError, match="AI_GRADING_REVIEW_VARIANCE_MIN_ANSWERS"):
         _settings(AI_GRADING_REVIEW_VARIANCE_MIN_ANSWERS=1)
 
@@ -183,6 +190,13 @@ def test_invalid_ocr_settings_are_rejected() -> None:
         _settings(OCR_SPLIT_HEADER_MIN_CONFIDENCE=1.2)
     with pytest.raises(ValidationError, match="OCR_SPLIT_HEADER_CONCURRENCY"):
         _settings(OCR_SPLIT_HEADER_CONCURRENCY=0)
+
+
+def test_invalid_export_settings_are_rejected() -> None:
+    with pytest.raises(ValidationError, match="EXPORT_GLOBAL_CONCURRENCY"):
+        _settings(EXPORT_GLOBAL_CONCURRENCY=0)
+    with pytest.raises(ValidationError, match="EXPORT_SUBMISSIONS_ZIP_MAX_SUBMISSIONS"):
+        _settings(EXPORT_SUBMISSIONS_ZIP_MAX_SUBMISSIONS=0)
 
 
 def test_invalid_grading_strictness_is_rejected() -> None:

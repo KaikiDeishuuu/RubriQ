@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     ai_grading_review_enabled: bool = Field(default=False, alias="AI_GRADING_REVIEW_ENABLED")
     ai_grading_review_model: str | None = Field(default=None, alias="AI_GRADING_REVIEW_MODEL")
     ai_grading_review_score_delta_ratio: float = Field(default=0.15, alias="AI_GRADING_REVIEW_SCORE_DELTA_RATIO")
+    ai_grading_review_low_score_ratio: float = Field(default=0.25, alias="AI_GRADING_REVIEW_LOW_SCORE_RATIO")
+    ai_grading_review_formula_force_review: bool = Field(default=True, alias="AI_GRADING_REVIEW_FORMULA_FORCE_REVIEW")
+    ai_grading_review_zero_score_force_review: bool = Field(default=True, alias="AI_GRADING_REVIEW_ZERO_SCORE_FORCE_REVIEW")
     ai_grading_review_variance_min_answers: int = Field(default=3, alias="AI_GRADING_REVIEW_VARIANCE_MIN_ANSWERS")
     ai_grading_review_variance_range_ratio: float = Field(default=0.45, alias="AI_GRADING_REVIEW_VARIANCE_RANGE_RATIO")
     ai_grading_strictness: str = Field(default="moderate", alias="AI_GRADING_STRICTNESS")
@@ -68,6 +71,7 @@ class Settings(BaseSettings):
     ocr_preprocess_rubric_enabled: bool = Field(default=False, alias="OCR_PREPROCESS_RUBRIC_ENABLED")
     ocr_preprocess_student_enabled: bool = Field(default=True, alias="OCR_PREPROCESS_STUDENT_ENABLED")
     ocr_preprocess_split_header_enabled: bool = Field(default=True, alias="OCR_PREPROCESS_SPLIT_HEADER_ENABLED")
+    ocr_preprocess_roster_enabled: bool = Field(default=False, alias="OCR_PREPROCESS_ROSTER_ENABLED")
     paddle_ocr_base_url: str = Field(
         default="https://paddleocr.aistudio-app.com/api/v2/ocr/jobs",
         alias="PADDLE_OCR_BASE_URL",
@@ -110,7 +114,11 @@ class Settings(BaseSettings):
             raise ValueError("AI_GRADING_BATCH_SIZE must be between 1 and 200")
         return value
 
-    @field_validator("ai_grading_review_score_delta_ratio", "ai_grading_review_variance_range_ratio")
+    @field_validator(
+        "ai_grading_review_score_delta_ratio",
+        "ai_grading_review_low_score_ratio",
+        "ai_grading_review_variance_range_ratio",
+    )
     @classmethod
     def _validate_review_ratio(cls, value: float) -> float:
         if value < 0 or value > 1:
@@ -122,6 +130,41 @@ class Settings(BaseSettings):
     def _validate_review_min_answers(cls, value: int) -> int:
         if value < 2:
             raise ValueError("AI_GRADING_REVIEW_VARIANCE_MIN_ANSWERS must be at least 2")
+        return value
+
+    @field_validator("export_global_concurrency")
+    @classmethod
+    def _validate_export_global_concurrency(cls, value: int) -> int:
+        if value < 1 or value > 8:
+            raise ValueError("EXPORT_GLOBAL_CONCURRENCY must be between 1 and 8")
+        return value
+
+    @field_validator("export_submissions_zip_max_submissions")
+    @classmethod
+    def _validate_export_submissions_zip_max_submissions(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("EXPORT_SUBMISSIONS_ZIP_MAX_SUBMISSIONS must be at least 1")
+        return value
+
+    @field_validator("submissions_upload_max_files")
+    @classmethod
+    def _validate_submissions_upload_max_files(cls, value: int) -> int:
+        if value < 1 or value > 200:
+            raise ValueError("SUBMISSIONS_UPLOAD_MAX_FILES must be between 1 and 200")
+        return value
+
+    @field_validator("batch_zip_max_entries")
+    @classmethod
+    def _validate_batch_zip_max_entries(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("BATCH_ZIP_MAX_ENTRIES must be at least 1")
+        return value
+
+    @field_validator("batch_zip_max_uncompressed_bytes")
+    @classmethod
+    def _validate_batch_zip_max_uncompressed_bytes(cls, value: int) -> int:
+        if value < 1024 * 1024:
+            raise ValueError("BATCH_ZIP_MAX_UNCOMPRESSED_BYTES must be at least 1 MiB")
         return value
 
     @field_validator("paddle_ocr_timeout_seconds", "paddle_ocr_poll_interval_seconds", "paddle_ocr_max_poll_seconds")
@@ -160,6 +203,13 @@ class Settings(BaseSettings):
     redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
     storage_dir: Path = Field(default=ROOT_DIR / "storage", alias="STORAGE_DIR")
     max_upload_mb: int = Field(default=25, alias="MAX_UPLOAD_MB")
+    admin_api_token: str | None = Field(default=None, alias="ADMIN_API_TOKEN")
+    admin_api_token_required: bool = Field(default=False, alias="ADMIN_API_TOKEN_REQUIRED")
+    export_global_concurrency: int = Field(default=2, alias="EXPORT_GLOBAL_CONCURRENCY")
+    export_submissions_zip_max_submissions: int = Field(default=200, alias="EXPORT_SUBMISSIONS_ZIP_MAX_SUBMISSIONS")
+    submissions_upload_max_files: int = Field(default=20, alias="SUBMISSIONS_UPLOAD_MAX_FILES")
+    batch_zip_max_entries: int = Field(default=300, alias="BATCH_ZIP_MAX_ENTRIES")
+    batch_zip_max_uncompressed_bytes: int = Field(default=2 * 1024 * 1024 * 1024, alias="BATCH_ZIP_MAX_UNCOMPRESSED_BYTES")
     render_dpi: int = Field(default=200, alias="RENDER_DPI")
     ai_request_timeout_seconds: float = Field(default=120.0, alias="AI_REQUEST_TIMEOUT_SECONDS")
     ai_max_retries: int = Field(default=2, alias="AI_MAX_RETRIES")
@@ -202,7 +252,7 @@ class Settings(BaseSettings):
         if route_key == "vision_split_header":
             return self.ocr_preprocess_split_header_enabled
         if route_key == "vision_roster":
-            return self.ocr_preprocess_rubric_enabled
+            return self.ocr_preprocess_roster_enabled
         return False
 
     def ai_model_candidates(self, route_key: AIRouteKey) -> list[AIModelCandidate]:
@@ -295,6 +345,10 @@ class Settings(BaseSettings):
     @property
     def max_upload_bytes(self) -> int:
         return self.max_upload_mb * 1024 * 1024
+
+    @property
+    def admin_token_enforced(self) -> bool:
+        return self.admin_api_token_required or bool(_clean_optional_string(self.admin_api_token))
 
 
 def _route_profile(route_key: AIRouteKey) -> AIRequestProfile:

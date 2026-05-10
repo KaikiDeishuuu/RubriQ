@@ -1,9 +1,11 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 
 import { AppShell } from './components/AppShell'
+import { ProtectedRoute } from './components/ProtectedRoute'
 import { BatchResultsPage } from './pages/BatchResultsPage'
 import { CreateExamPage } from './pages/CreateExamPage'
 import { ExamListPage } from './pages/ExamListPage'
+import { LoginPage } from './pages/LoginPage'
 import { RosterPage } from './pages/RosterPage'
 import { RubricReviewPage } from './pages/RubricReviewPage'
 import { SubmissionReviewPage } from './pages/SubmissionReviewPage'
@@ -12,7 +14,14 @@ import { SubmissionUploadPage } from './pages/SubmissionUploadPage'
 export default function App() {
   return (
     <Routes>
-      <Route element={<AppShell />}>
+      <Route path="/login" element={<LoginPage />} />
+      <Route
+        element={
+          <ProtectedRoute>
+            <AppShell />
+          </ProtectedRoute>
+        }
+      >
         <Route path="/" element={<Navigate to="/exams" replace />} />
         <Route path="/exams" element={<ExamListPage />} />
         <Route path="/exams/new" element={<CreateExamPage />} />

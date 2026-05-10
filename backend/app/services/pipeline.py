@@ -31,6 +31,7 @@ from app.services.llm import call_structured_json
 from app.services.ocr import build_ocr_reference_text, format_ocr_reference_text
 from app.services.pdf import RenderedPage, hash_file, render_pdf_to_images
 from app.storage.local import get_storage_service
+from app.utils.errors import sanitized_error_summary
 from app.utils.score import clamp_score
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,31 @@ _CONFIDENCE_RANK = {
     ConfidenceLevel.medium: 2,
     ConfidenceLevel.low: 1,
 }
+
+_FORMULA_OR_VISUAL_MARKERS = (
+    "=",
+    "+",
+    "-",
+    "*",
+    "/",
+    "^",
+    "√",
+    "∑",
+    "∫",
+    "≈",
+    "≠",
+    "≤",
+    "≥",
+    "%",
+    "图",
+    "曲线",
+    "坐标",
+    "公式",
+    "方程",
+    "推导",
+    "计算",
+    "单位",
+)
 
 
 def _to_decimal(value: float | int | Decimal) -> Decimal:
@@ -266,11 +292,13 @@ def parse_rubric_for_exam(session: Session, exam_id: int, exam_file_id: int | No
             time.perf_counter() - vision_started_at,
         )
     except Exception as exc:  # noqa: BLE001 - rubric parsing should surface a user-visible failure
-        exam_file.error_message = str(exc)
+        logger.exception("Rubric parsing failed exam_id=%s exam_file_id=%s", exam_id, exam_file.id)
+        exam_file.error_message = sanitized_error_summary(exc, "Rubric parsing failed")
         session.commit()
-        raise PipelineError(f"Rubric parsing failed: {exc}") from exc
+        raise PipelineError("Rubric parsing failed") from exc
 
     extracted_questions = _scored_questions_only(completion.data.questions)
+    _ensure_unique_question_numbers(extracted_questions)
     _replace_exam_questions(session, exam.id)
     exam = _load_exam(session, exam.id)
     for order_index, question_payload in enumerate(extracted_questions):
@@ -362,9 +390,16 @@ def process_submission(session: Session, submission_id: int) -> Submission:
     submission.raw_extraction_response = extraction_raw_response
     submission.error_message = None
 
-    extracted_by_question = {
-        answer.question_no: answer for answer in extraction_result.answers
-    }
+    extracted_by_question: dict[str, Any] = {}
+    for answer in extraction_result.answers:
+        if answer.question_no in extracted_by_question:
+            logger.warning(
+                "Duplicate extracted answer for question %s in submission %s; keeping the first occurrence",
+                answer.question_no,
+                submission.id,
+            )
+            continue
+        extracted_by_question[answer.question_no] = answer
     _replace_submission_answers(session, submission.id)
     session.flush()
     submission.status = SubmissionStatus.grading.value
@@ -442,7 +477,13 @@ def apply_teacher_override(
     update_teacher_override_score: bool = True,
     update_teacher_comment: bool = True,
 ) -> Answer:
-    answer = session.get(Answer, answer_id)
+    # SELECT ... FOR UPDATE acquires a row-level lock on PostgreSQL so a concurrent
+    # `review_answer_with_strong_model` worker can't flip review_decision to
+    # in_progress between our read and write. SQLite silently ignores the hint,
+    # which is fine for tests because Celery workers don't run there.
+    answer = session.execute(
+        select(Answer).where(Answer.id == answer_id).with_for_update()
+    ).scalar_one_or_none()
     if answer is None:
         raise PipelineError(f"Answer {answer_id} not found")
     if answer.review_decision == "in_progress":
@@ -525,6 +566,8 @@ def _grade_question(
             answer_text=answer_text,
             extraction_confidence=extraction_confidence,
             image_paths=review_image_paths or [],
+            fast_attempt=fast_attempt,
+            review_triggers=review_triggers,
         )
         if review_attempt is None:
             review_attempt = _call_grading_model(
@@ -582,6 +625,8 @@ def _call_grading_review_with_images(
     answer_text: str,
     extraction_confidence: ConfidenceLevel,
     image_paths: list[Path],
+    fast_attempt: GradingAttempt | None = None,
+    review_triggers: list[str] | None = None,
 ) -> GradingAttempt | None:
     if not image_paths:
         logger.info("Image-grounded grading review skipped question_id=%s reason=skipped_no_image", question.id)
@@ -592,15 +637,20 @@ def _call_grading_review_with_images(
     started_at = time.perf_counter()
     grading_model = settings.effective_grading_model_for_route("grading_review")
     try:
-        strictness = settings.ai_grading_strictness
+        # Reviewers always grade with the strict policy regardless of the global
+        # AI_GRADING_STRICTNESS setting. The reviewer's job is to catch the fast
+        # pass over-crediting, so it should not adopt a lenient stance even when
+        # the fast pass did.
+        strictness = "strict"
         strictness_instructions = _strictness_instructions(strictness)
+        review_input = _build_review_input(question, answer_text, fast_attempt, review_triggers=review_triggers)
         completion = call_structured_json(
             model=grading_model,
             system_prompt_name="grading.system.md",
             user_prompt_name="grading_review.user.md",
             response_model=GradingResult,
             prompt_variables={
-                "grading_input_json": json.dumps(_build_grading_input(question, answer_text), ensure_ascii=False, indent=2),
+                "grading_input_json": json.dumps(review_input, ensure_ascii=False, indent=2),
                 "strictness": strictness,
                 "strictness_instructions": strictness_instructions,
             },
@@ -780,15 +830,68 @@ def _has_positive_rubric_evidence(rubric_results: list[AnswerRubricResult]) -> b
 
 def _review_triggers_for_attempt(attempt: GradingAttempt, *, max_score: Decimal | None = None, answer_text: str = "") -> list[str]:
     triggers: list[str] = []
+    stripped_answer = answer_text.strip()
+    formula_like = _looks_formula_or_visual(stripped_answer)
+    score_ratio = _score_ratio(attempt.score, max_score)
     if attempt.confidence == ConfidenceLevel.low:
         triggers.append("low_confidence")
     if attempt.model_requested_review:
         triggers.append("model_requested_review")
     if attempt.missing_rubric_evidence:
         triggers.append("missing_rubric_evidence")
-    if answer_text.strip() and max_score is not None and max_score > 0 and attempt.score <= _to_decimal(float(max_score) * 0.25):
-        triggers.append("non_empty_low_score")
-    return triggers
+    if stripped_answer and score_ratio is not None:
+        if settings.ai_grading_review_zero_score_force_review and attempt.score <= 0:
+            triggers.append("zero_score_non_empty")
+        if attempt.score > 0 and score_ratio <= settings.ai_grading_review_low_score_ratio:
+            triggers.append("low_score_non_empty")
+            triggers.append("non_empty_low_score")
+    if stripped_answer and settings.ai_grading_review_formula_force_review and formula_like:
+        triggers.append("formula_like_answer")
+    if max_score is not None and max_score > 0:
+        # The fast pass occasionally awards 60-100% on a sparse or near-empty
+        # answer because the model picks up keyword fragments. Such cases are
+        # the most common over-credit pattern teachers complain about; force a
+        # second-pass review.
+        stripped_answer_chars = len(stripped_answer)
+        if score_ratio is not None and score_ratio >= 0.5 and stripped_answer_chars < 25:
+            triggers.append("sparse_answer_high_score")
+        # Same idea on the rubric side: high score but evidence text is too thin
+        # to actually justify it. Computed across all positive rubric_results.
+        positive_evidence_chars = _positive_evidence_chars(attempt)
+        if score_ratio is not None and score_ratio >= 0.6 and positive_evidence_chars < 15:
+            triggers.append("thin_rubric_evidence_high_score")
+        if formula_like and (
+            attempt.confidence == ConfidenceLevel.low
+            or attempt.score <= 0
+            or attempt.missing_rubric_evidence
+            or positive_evidence_chars < 10
+        ):
+            triggers.append("ocr_vision_mismatch_suspected")
+    return _dedupe_strings(triggers)
+
+
+def _score_ratio(score: Decimal, max_score: Decimal | None) -> float | None:
+    if max_score is None or max_score <= 0:
+        return None
+    return float(score) / float(max_score)
+
+
+def _positive_evidence_chars(attempt: GradingAttempt) -> int:
+    return sum(
+        len(result.evidence.strip())
+        for result in attempt.rubric_results
+        if result.awarded_score > 0
+    )
+
+
+def _looks_formula_or_visual(answer_text: str) -> bool:
+    if not answer_text.strip():
+        return False
+    if any(marker in answer_text for marker in _FORMULA_OR_VISUAL_MARKERS):
+        return True
+    operator_count = sum(answer_text.count(operator) for operator in ("+", "-", "*", "/", "^", "="))
+    digit_count = sum(character.isdigit() for character in answer_text)
+    return digit_count >= 3 and operator_count >= 2
 
 
 def _score_delta_exceeds_threshold(fast_score: Decimal, review_score: Decimal, max_score: Decimal) -> bool:
@@ -838,6 +941,80 @@ def _build_grading_input(question: QuestionSnapshot, answer_text: str) -> dict[s
         ],
         "student_answer": answer_text,
     }
+
+
+def _build_review_input(
+    question: QuestionSnapshot,
+    answer_text: str,
+    fast_attempt: GradingAttempt | None,
+    *,
+    review_triggers: list[str] | None = None,
+) -> dict[str, Any]:
+    payload = _build_grading_input(question, answer_text)
+    payload["answer_text_length"] = len(answer_text.strip())
+    payload["formula_like_hint"] = _looks_formula_or_visual(answer_text)
+    payload["review_trigger_hints"] = list(review_triggers or [])
+    if fast_attempt is None:
+        payload["fast_pass_score_ratio"] = None
+        return payload
+    payload["fast_pass_score_ratio"] = _score_ratio(fast_attempt.score, question.max_score)
+    payload["fast_pass_evaluation"] = {
+        "score": float(fast_attempt.score),
+        "max_score": float(question.max_score),
+        "confidence": fast_attempt.confidence.value,
+        "model_requested_review": fast_attempt.model_requested_review,
+        "missing_rubric_evidence": fast_attempt.missing_rubric_evidence,
+        "rubric_evaluation": [
+            {
+                "rubric_item_id": result.rubric_item_id,
+                "awarded_score": float(result.awarded_score),
+                "evidence": result.evidence,
+                "reason": result.reason,
+            }
+            for result in fast_attempt.rubric_results
+        ],
+        "missing_points": list(fast_attempt.missing_points),
+        "comment": fast_attempt.ai_comment,
+    }
+    return payload
+
+
+def _fast_attempt_from_answer(answer: Answer, question: QuestionSnapshot) -> GradingAttempt | None:
+    """Reconstruct a fast-pass GradingAttempt from a stored Answer.
+
+    Used by post-batch variance review so the second-pass reviewer still gets
+    fast-pass context as part of its dual-judge prompt. Returns None when the
+    Answer was never graded by a fast pass (e.g. failed-extraction fallback).
+    """
+
+    if answer.fast_score is None and answer.fast_raw_ai_response is None:
+        return None
+    fast_score = _to_decimal(answer.fast_score) if answer.fast_score is not None else _to_decimal(answer.score)
+    try:
+        fast_confidence = ConfidenceLevel(answer.fast_confidence) if answer.fast_confidence else ConfidenceLevel(answer.confidence)
+    except ValueError:
+        fast_confidence = ConfidenceLevel.low
+    rubric_results = [
+        AnswerRubricResult(
+            rubric_item_id=result.rubric_item_id,
+            awarded_score=_to_decimal(result.awarded_score),
+            evidence=result.evidence or "",
+            reason=result.reason or "",
+        )
+        for result in (answer.rubric_results or [])
+    ]
+    return GradingAttempt(
+        score=fast_score,
+        confidence=fast_confidence,
+        ai_comment=answer.fast_ai_comment or answer.ai_comment or "",
+        missing_points=list(answer.fast_missing_points or answer.missing_points or []),
+        raw_response=answer.fast_raw_ai_response or "",
+        rubric_results=rubric_results,
+        needs_human_review=bool(answer.needs_human_review),
+        model="",
+        model_requested_review=False,
+        missing_rubric_evidence=False,
+    )
 
 
 def _strictness_instructions(strictness: str) -> str:
@@ -939,6 +1116,7 @@ def review_answer_with_strong_model(
         answer_text=answer.extracted_answer,
         extraction_confidence=ConfidenceLevel(answer.confidence),
         image_paths=_submission_review_image_paths(session, answer.submission_id, answer.source_page),
+        fast_attempt=_fast_attempt_from_answer(answer, question),
     )
     if review_attempt is None:
         review_attempt = _call_grading_model(
@@ -1061,7 +1239,10 @@ def _extract_submission_answers(
         return completion.data, completion.raw_text
     except Exception as exc:  # noqa: BLE001 - fall back to an empty extraction result for manual review
         logger.exception("Student extraction failed; falling back to empty answers")
-        return StudentExtractionResult(student_name=None, student_id=None, answers=[]), f"ERROR: {exc}"
+        return (
+            StudentExtractionResult(student_name=None, student_id=None, answers=[]),
+            f"ERROR: {sanitized_error_summary(exc, 'Student extraction failed')}",
+        )
 
 
 def _scored_questions_only(questions: list[ExtractedQuestion]) -> list[ExtractedQuestion]:
@@ -1085,12 +1266,35 @@ def _scored_questions_only(questions: list[ExtractedQuestion]) -> list[Extracted
             # Drop the parent whenever children carry the score so totals don't double-count.
             # Tolerance covers AI rounding (e.g. 19 vs 18.5).
             if child_total + 0.5 >= parent_total:
+                logger.warning(
+                    "Dropping parent question %s (max_score=%s) because child questions cover the score (child_total=%s)",
+                    question_no,
+                    parent_total,
+                    child_total,
+                )
                 continue
             # Also drop when parent has no rubric items of its own — preserves prior behaviour.
             if not question.rubric_items:
+                logger.warning(
+                    "Dropping parent question %s with no rubric items but %s child question(s)",
+                    question_no,
+                    len(children),
+                )
                 continue
         scored_questions.append(question)
     return scored_questions
+
+
+def _ensure_unique_question_numbers(questions: Iterable[ExtractedQuestion]) -> None:
+    seen: set[str] = set()
+    for question in questions:
+        question_no = question.question_no.strip()
+        if not question_no:
+            raise PipelineError("Rubric parsing produced an empty question number")
+        normalized = question_no.lower()
+        if normalized in seen:
+            raise PipelineError(f"Rubric parsing produced duplicate question number {question_no}")
+        seen.add(normalized)
 
 
 def _replace_exam_questions(session: Session, exam_id: int) -> None:

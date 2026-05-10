@@ -6,6 +6,7 @@ from app.db.session import SessionLocal
 from app.models import Submission, SubmissionStatus
 from app.services.batch_pipeline import prepare_batch_split, refresh_batch_grading_status, review_batch_grading, start_batch_grading
 from app.services.pipeline import process_submission
+from app.utils.errors import sanitized_error_summary
 from app.workers.celery_app import celery_app
 
 
@@ -47,7 +48,7 @@ def process_submission_task(submission_id: int) -> dict[str, int | str]:
         if submission is not None:
             batch_id = submission.batch_id
             submission.status = SubmissionStatus.failed.value
-            submission.error_message = str(exc)
+            submission.error_message = sanitized_error_summary(exc, "Submission processing failed")
             session.commit()
             if batch_id is not None:
                 refresh_batch_grading_status(session, batch_id)

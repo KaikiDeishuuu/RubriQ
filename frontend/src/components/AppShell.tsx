@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { NavLink, Outlet } from 'react-router-dom'
+import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 
+import { setAdminToken } from '../lib/api'
 import { toClassNames } from '../lib/format'
 
 const navItems = [
@@ -10,6 +11,7 @@ const navItems = [
 
 export function AppShell() {
   const [showBackToTop, setShowBackToTop] = useState(false)
+  const navigate = useNavigate()
 
   useEffect(() => {
     function handleScroll() {
@@ -22,6 +24,11 @@ export function AppShell() {
 
   function scrollToTop() {
     window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
+  function handleLogout() {
+    setAdminToken(null)
+    navigate('/login', { replace: true })
   }
 
   return (
@@ -78,6 +85,13 @@ export function AppShell() {
                 每个分数都保留 rubric 证据与教师改分痕迹，扣分摘要可编辑后再导出 PDF。
               </p>
             </div>
+            <button
+              type="button"
+              onClick={handleLogout}
+              className="rounded-full border border-white/15 bg-white/5 px-4 py-2 text-xs font-semibold text-slate-200 transition hover:bg-white/10 hover:text-white"
+            >
+              退出登录
+            </button>
           </div>
         </aside>
         <main className="flex-1 px-4 py-4 sm:px-6 lg:px-8 lg:py-8">

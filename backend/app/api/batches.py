@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from app.api.common import load_exam_detail
-from app.api.deps import get_db
+from app.api.deps import get_db, require_admin_token
 from app.core.config import settings
 from app.models import BatchStatus, BatchUploadMode, SubmissionBatch
 from app.schemas.batch import (
@@ -23,7 +23,8 @@ from app.services.batch_pipeline import (
     update_batch_candidates,
 )
 from app.storage.local import get_storage_service
-from app.utils.files import validate_pdf_upload
+from app.utils.errors import public_error_message
+from app.utils.files import read_upload_limited, validate_pdf_upload
 from app.workers.tasks import prepare_batch_split_task
 
 router = APIRouter(prefix="/exams/{exam_id}/batches", tags=["batches"])
@@ -35,13 +36,16 @@ async def upload_batch(
     mode: BatchUploadMode = Form(...),
     file: UploadFile = File(...),
     pages_per_submission: int | None = Form(default=None),
+    _: None = Depends(require_admin_token),
     session: Session = Depends(get_db),
 ):
     _load_exam_or_404(session, exam_id)
     await _validate_batch_upload(mode, file, pages_per_submission)
-    data = await file.read()
-    if len(data) > settings.max_upload_bytes:
-        raise HTTPException(status_code=413, detail="Uploaded batch file is too large")
+    data = await read_upload_limited(
+        file,
+        settings.max_upload_bytes,
+        too_large_detail="Uploaded batch file is too large",
+    )
     storage = get_storage_service()
     filename = file.filename or _default_source_filename(mode)
     if mode == BatchUploadMode.zip:
@@ -65,13 +69,22 @@ async def upload_batch(
 
 
 @router.get("", response_model=list[BatchDetail])
-def list_batches(exam_id: int, session: Session = Depends(get_db)):
+def list_batches(
+    exam_id: int,
+    _: None = Depends(require_admin_token),
+    session: Session = Depends(get_db),
+):
     _load_exam_or_404(session, exam_id)
     return [BatchDetail.model_validate(batch) for batch in list_exam_batches(session, exam_id)]
 
 
 @router.get("/{batch_id}", response_model=BatchDetail)
-def get_batch(exam_id: int, batch_id: int, session: Session = Depends(get_db)):
+def get_batch(
+    exam_id: int,
+    batch_id: int,
+    _: None = Depends(require_admin_token),
+    session: Session = Depends(get_db),
+):
     batch = _load_batch_or_404(session, exam_id, batch_id)
     return BatchDetail.model_validate(batch)
 
@@ -81,23 +94,29 @@ def update_candidates(
     exam_id: int,
     batch_id: int,
     payload: BatchCandidatesUpdateRequest,
+    _: None = Depends(require_admin_token),
     session: Session = Depends(get_db),
 ):
     _load_batch_or_404(session, exam_id, batch_id)
     try:
         batch = update_batch_candidates(session, batch_id, payload.candidates)
     except BatchPipelineError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=public_error_message(exc, "Batch request failed")) from exc
     return BatchDetail.model_validate(batch)
 
 
 @router.post("/{batch_id}/confirm-split", response_model=BatchConfirmResponse)
-def confirm_split(exam_id: int, batch_id: int, session: Session = Depends(get_db)):
+def confirm_split(
+    exam_id: int,
+    batch_id: int,
+    _: None = Depends(require_admin_token),
+    session: Session = Depends(get_db),
+):
     _load_batch_or_404(session, exam_id, batch_id)
     try:
         result = confirm_batch_split(session, batch_id)
     except BatchPipelineError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=public_error_message(exc, "Batch request failed")) from exc
     return BatchConfirmResponse(
         batch=BatchDetail.model_validate(result.batch),
         created_submission_count=result.created_submission_count,
@@ -106,12 +125,17 @@ def confirm_split(exam_id: int, batch_id: int, session: Session = Depends(get_db
 
 
 @router.post("/{batch_id}/start-grading", response_model=BatchStartGradingResponse)
-def start_grading(exam_id: int, batch_id: int, session: Session = Depends(get_db)):
+def start_grading(
+    exam_id: int,
+    batch_id: int,
+    _: None = Depends(require_admin_token),
+    session: Session = Depends(get_db),
+):
     _load_batch_or_404(session, exam_id, batch_id)
     try:
         batch, queued_count = start_batch_grading(session, batch_id)
     except BatchPipelineError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=public_error_message(exc, "Batch request failed")) from exc
     return BatchStartGradingResponse(
         batch_id=batch.id,
         queued_submission_count=queued_count,
@@ -135,21 +159,21 @@ async def _validate_batch_upload(
     try:
         await validate_pdf_upload(file)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=public_error_message(exc, "Batch request failed")) from exc
 
 
 def _load_exam_or_404(session: Session, exam_id: int):
     try:
         return load_exam_detail(session, exam_id)
     except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=public_error_message(exc, "Batch request failed")) from exc
 
 
 def _load_batch_or_404(session: Session, exam_id: int, batch_id: int) -> SubmissionBatch:
     try:
         batch = load_batch_detail(session, batch_id)
     except BatchPipelineError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail=public_error_message(exc, "Batch request failed")) from exc
     if batch.exam_id != exam_id:
         raise HTTPException(status_code=404, detail="Batch not found")
     return batch
