@@ -325,7 +325,7 @@ export function RubricReviewPage() {
 			{error ? <Message message={error} tone="error" /> : null}
 			{feedback ? <Message message={feedback} tone={parsing ? 'neutral' : 'success'} /> : null}
 
-			<div className="grid gap-6 xl:grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)]">
+			<div className="grid items-start gap-6 xl:grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)]">
 				<SectionCard title="上传并解析" description="先上传评分标准 PDF，解析后会生成可编辑的题目和评分项。">
 					<div className="space-y-4">
 						<DropZone
