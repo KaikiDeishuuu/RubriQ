@@ -1,4 +1,4 @@
-import React, { FormEvent, useState } from 'react'
+import React, { FormEvent, useRef, useState } from 'react'
 
 import { createBadCase } from '../lib/api'
 import { formatBadCaseRoute } from '../lib/badcases'
@@ -28,11 +28,21 @@ export function BadCaseReportButton({
   label = '报告 OCR',
   initialOpen = false,
 }: BadCaseReportButtonProps) {
+  const triggerRef = useRef<HTMLButtonElement>(null)
   const [open, setOpen] = useState(initialOpen)
+  const [popoverPosition, setPopoverPosition] = useState<{ left: number; top: number } | null>(null)
   const [note, setNote] = useState('')
   const [saving, setSaving] = useState(false)
   const [reported, setReported] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  function openPopover() {
+    const rect = triggerRef.current?.getBoundingClientRect()
+    if (rect) {
+      setPopoverPosition({ left: Math.max(16, Math.min(rect.left, window.innerWidth - 464)), top: rect.bottom + 8 })
+    }
+    setOpen(true)
+  }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -61,8 +71,9 @@ export function BadCaseReportButton({
   return (
     <div className="relative inline-flex">
       <button
+        ref={triggerRef}
         type="button"
-        onClick={() => setOpen(true)}
+        onClick={openPopover}
         disabled={saving || reported}
         className={toClassNames(
           'inline-flex items-center rounded-full font-semibold transition disabled:opacity-60',
@@ -78,8 +89,12 @@ export function BadCaseReportButton({
 
       {open ? (
         <>
-          <button type="button" aria-label="关闭 OCR Bad Case 报告" className="fixed inset-0 z-40 cursor-default" onClick={() => setOpen(false)} />
-          <form onSubmit={handleSubmit} className="absolute left-0 top-full z-50 mt-2 w-[min(28rem,calc(100vw-2rem))] rounded-3xl border border-ink-900/10 bg-white p-5 text-left shadow-lift">
+          <button type="button" aria-label="关闭 OCR Bad Case 报告" className="fixed inset-0 z-50 cursor-default" onClick={() => setOpen(false)} />
+          <form
+            onSubmit={handleSubmit}
+            className="fixed z-[60] w-[min(28rem,calc(100vw-2rem))] rounded-3xl border border-ink-900/10 bg-white p-5 text-left shadow-lift"
+            style={{ left: popoverPosition?.left ?? 16, top: popoverPosition?.top ?? 80 }}
+          >
             <div className="flex items-start justify-between gap-4">
               <div>
                 <h2 className="font-display text-xl text-ink-950">报告 OCR Bad Case</h2>
