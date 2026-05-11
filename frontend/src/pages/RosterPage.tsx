@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
+import { BadCaseReportButton } from '../components/BadCaseReportButton'
 import { DropZone } from '../components/DropZone'
 import { ExamWizardSteps, WizardNav, emptyWizardStatus } from '../components/ExamWizard'
 import { SectionCard } from '../components/SectionCard'
@@ -13,6 +14,7 @@ import {
   putRoster,
   uploadRoster,
 } from '../lib/api'
+import { renderedExamFilePagePath } from '../lib/badcases'
 import { toClassNames } from '../lib/format'
 import type { ExamDetail, RosterDetail, RosterEntry, RosterStatus } from '../lib/types'
 
@@ -177,6 +179,16 @@ export function RosterPage() {
   const rubricDone = Boolean(exam && !exam.needs_rubric_review && exam.questions.length > 0)
   const dirty = useMemo(() => roster ? !areDraftsEqual(drafts, rosterToDrafts(roster.entries)) : false, [drafts, roster])
   const filledDraftCount = drafts.filter((draft) => draft.student_name.trim() || draft.student_id.trim()).length
+  const latestRosterFile = useMemo(() => {
+    if (!exam) {
+      return null
+    }
+    const rosterFiles = exam.files.filter((file) => file.file_type === 'roster_pdf')
+    return rosterFiles[rosterFiles.length - 1] ?? null
+  }, [exam])
+  const latestRosterPagePaths = latestRosterFile?.page_count
+    ? Array.from({ length: latestRosterFile.page_count }, (_, index) => renderedExamFilePagePath(numericExamId, 'roster', latestRosterFile.id, index + 1))
+    : []
 
   return (
     <div className="space-y-6">
@@ -230,12 +242,21 @@ export function RosterPage() {
 
       <div className="grid gap-6 xl:grid-cols-2">
         <SectionCard title="PDF 名单（视觉解析）" description="上传 PDF 后将调用视觉模型自动提取学生姓名与学号。">
-          <DropZone
-            title="拖拽名单 PDF"
-            description="上传后自动触发解析，结果会出现在右侧表格中等待确认。"
-            accept=".pdf"
-            onFilesSelected={(files) => void handleUpload(files, 'pdf')}
-          />
+          <div className="space-y-4">
+            <DropZone
+              title="拖拽名单 PDF"
+              description="上传后自动触发解析，结果会出现在右侧表格中等待确认。"
+              accept=".pdf"
+              onFilesSelected={(files) => void handleUpload(files, 'pdf')}
+            />
+            {latestRosterPagePaths.length > 0 ? (
+              <div className="flex flex-wrap gap-2 rounded-2xl border border-ink-900/10 bg-white/80 p-3">
+                {latestRosterPagePaths.map((path) => (
+                  <BadCaseReportButton key={path} imageStoragePath={path} routeKey="vision_roster" examId={numericExamId} compact />
+                ))}
+              </div>
+            ) : null}
+          </div>
         </SectionCard>
 
         <SectionCard title="CSV / Excel 名单" description="支持 .csv / .xlsx 文件，需要包含「姓名」「学号」列（中英文都识别）。">

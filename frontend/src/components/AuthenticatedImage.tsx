@@ -1,4 +1,4 @@
-import { useEffect, useState, type ImgHTMLAttributes, type CSSProperties } from 'react'
+import React, { useEffect, useState, type ImgHTMLAttributes, type CSSProperties } from 'react'
 
 import { fetchStorageBlob } from '../lib/api'
 

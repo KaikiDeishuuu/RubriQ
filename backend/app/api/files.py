@@ -8,7 +8,7 @@ from sqlalchemy import literal, select, union_all
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, require_admin_token
-from app.models import BatchPage, BatchSplitCandidate, ExamFile, Submission, SubmissionBatch, SubmissionPage
+from app.models import BatchPage, BatchSplitCandidate, ExamFile, OcrBadCase, Submission, SubmissionBatch, SubmissionPage
 from app.storage.local import get_storage_service
 
 router = APIRouter(prefix="/storage", tags=["storage"])
@@ -42,5 +42,6 @@ def _storage_path_is_referenced(session: Session, relative_path: str) -> bool:
         select(literal(1)).where(SubmissionBatch.source_storage_path == target),
         select(literal(1)).where(BatchPage.image_path == target),
         select(literal(1)).where(BatchSplitCandidate.source_storage_path == target),
+        select(literal(1)).where(OcrBadCase.image_storage_path == target),
     ).limit(1)
     return session.execute(stmt).first() is not None

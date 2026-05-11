@@ -86,6 +86,9 @@ class Settings(BaseSettings):
     ocr_min_text_chars_for_reference: int = Field(default=80, alias="OCR_MIN_TEXT_CHARS_FOR_REFERENCE")
     ocr_split_header_min_confidence: float = Field(default=0.75, alias="OCR_SPLIT_HEADER_MIN_CONFIDENCE")
     ocr_split_header_concurrency: int = Field(default=4, alias="OCR_SPLIT_HEADER_CONCURRENCY")
+    badcase_redact_salt: str | None = Field(default=None, alias="BADCASE_REDACT_SALT")
+    badcase_export_max_cases: int = Field(default=500, alias="BADCASE_EXPORT_MAX_CASES")
+    badcase_top_strip_ratio: float = Field(default=0.12, alias="BADCASE_TOP_STRIP_RATIO")
 
     @field_validator("ai_grading_strictness")
     @classmethod
@@ -209,6 +212,20 @@ class Settings(BaseSettings):
     def _validate_ocr_split_header_concurrency(cls, value: int) -> int:
         if value < 1 or value > 8:
             raise ValueError("OCR_SPLIT_HEADER_CONCURRENCY must be between 1 and 8")
+        return value
+
+    @field_validator("badcase_export_max_cases")
+    @classmethod
+    def _validate_badcase_export_max_cases(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("BADCASE_EXPORT_MAX_CASES must be at least 1")
+        return value
+
+    @field_validator("badcase_top_strip_ratio")
+    @classmethod
+    def _validate_badcase_top_strip_ratio(cls, value: float) -> float:
+        if value <= 0 or value > 1:
+            raise ValueError("BADCASE_TOP_STRIP_RATIO must be greater than 0 and less than or equal to 1")
         return value
 
     api_v1_prefix: str = Field(default="/api", alias="API_V1_PREFIX")

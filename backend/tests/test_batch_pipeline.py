@@ -435,6 +435,27 @@ def test_auto_split_low_confidence_ocr_falls_back_to_vision(session, monkeypatch
     assert "姓名 Alice" in seen_prompt_variables[0]["ocr_reference_text"]
 
 
+def test_auto_split_header_enqueues_rejected_ocr_bad_case(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    exam = _create_exam(session)
+    source_pdf = settings.storage_dir / "combined.pdf"
+    _create_pdf(source_pdf, 1)
+    batch = _create_batch(session, exam.id, BatchUploadMode.combined_auto.value, source_pdf)
+    calls: list[dict] = []
+
+    monkeypatch.setattr(batch_pipeline, "extract_header_text_diagnostic", lambda *_args, **_kwargs: _ocr_diagnostic("姓名 Alice"))
+    monkeypatch.setattr(batch_pipeline, "call_structured_json", lambda **_kwargs: _fake_completion("Alice", "S001", 0.95))
+    monkeypatch.setattr(batch_pipeline.bad_cases, "enqueue", lambda _session=None, **kwargs: calls.append(kwargs) or 1)
+
+    prepared = prepare_batch_split(session, batch.id)
+
+    assert len(prepared.pages) == 1
+    assert calls[0]["route_key"] == "vision_split_header"
+    assert calls[0]["trigger_reason"] == "regex_no_student_id"
+    assert calls[0]["image_storage_path"].endswith("page-001.png")
+    assert calls[0]["batch_id"] == batch.id
+    assert calls[0]["batch_page_id"] == prepared.pages[0].id
+
+
 def test_auto_split_header_extraction_uses_configured_concurrency(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     seen_workers: list[int] = []
 

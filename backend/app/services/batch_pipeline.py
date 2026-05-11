@@ -28,6 +28,7 @@ from app.models import (
 )
 from app.schemas.ai import PageHeaderExtraction
 from app.schemas.batch import BatchCandidateUpdate
+from app.services import bad_cases
 from app.services.llm import call_structured_json
 from app.services.ocr import HeaderOCRDiagnostic, extract_header_text_diagnostic, format_ocr_reference_text
 from app.services.pipeline import _to_decimal, review_answer_with_strong_model
@@ -78,6 +79,14 @@ COMPLETED_SUBMISSION_STATUSES = {
 }
 STALE_SUBMISSION_MESSAGE = "Submission processing timed out or worker stopped"
 STALE_BATCH_REVIEW_MESSAGE = "Batch grading review timed out or worker stopped"
+BADCASE_HEADER_REASONS = {
+    "regex_no_identity",
+    "regex_no_student_name",
+    "regex_no_student_id",
+    "ocr_low_confidence",
+    "ocr_empty_text",
+    "ocr_request_failed",
+}
 
 
 class BatchPipelineError(RuntimeError):
@@ -115,6 +124,9 @@ class HeaderExtractionResult:
     header_data: dict[str, Any]
     raw_text: str
     error_message: str | None
+    ocr_acceptance_reason: str | None = None
+    ocr_raw_text: str | None = None
+    ocr_error_message: str | None = None
 
 
 def load_batch_detail(session: Session, batch_id: int) -> SubmissionBatch:
@@ -784,20 +796,36 @@ def _prepare_auto_split_batch(session: Session, batch: SubmissionBatch) -> None:
     ]
     header_extractions = _extract_headers_for_auto_split(header_crops)
     header_results: list[dict[str, Any]] = []
+    extraction_pages: list[tuple[HeaderExtractionResult, BatchPage]] = []
     for extraction in header_extractions:
         header_results.append(extraction.header_data)
-        session.add(
-            BatchPage(
-                batch_id=batch.id,
-                page_no=extraction.page_no,
-                image_path=storage.relative_path_for(extraction.page_image_path),
-                page_hash=hash_file(extraction.page_image_path),
-                extracted_text=extraction.extracted_text,
-                header_extraction_json=extraction.header_data,
-                raw_ai_response=extraction.raw_text,
-                error_message=extraction.error_message,
-            )
+        batch_page = BatchPage(
+            batch_id=batch.id,
+            page_no=extraction.page_no,
+            image_path=storage.relative_path_for(extraction.page_image_path),
+            page_hash=hash_file(extraction.page_image_path),
+            extracted_text=extraction.extracted_text,
+            header_extraction_json=extraction.header_data,
+            raw_ai_response=extraction.raw_text,
+            error_message=extraction.error_message,
         )
+        session.add(batch_page)
+        extraction_pages.append((extraction, batch_page))
+    session.flush()
+    for extraction, batch_page in extraction_pages:
+        if extraction.ocr_acceptance_reason in BADCASE_HEADER_REASONS:
+            bad_cases.enqueue(
+                session,
+                route_key="vision_split_header",
+                image_storage_path=storage.relative_path_for(extraction.crop_path),
+                ocr_raw_text=extraction.ocr_raw_text or "",
+                ocr_error_message=extraction.ocr_error_message,
+                trigger_reason=extraction.ocr_acceptance_reason,
+                image_hash=hash_file(extraction.crop_path),
+                exam_id=batch.exam_id,
+                batch_id=batch.id,
+                batch_page_id=batch_page.id,
+            )
     batch.total_pages = len(rendered_pages)
     batch.raw_split_extraction_response = {"pages": header_results}
     roster_index = build_roster_index(session, batch.exam_id)
@@ -875,6 +903,9 @@ def _extract_single_header_for_auto_split(header_crop: RenderedHeaderCrop) -> He
         header_data=header_data,
         raw_text=raw_text,
         error_message=error_message,
+        ocr_acceptance_reason=ocr_acceptance_reason,
+        ocr_raw_text=ocr_diagnostic.text,
+        ocr_error_message=ocr_diagnostic.error_message,
     )
 
 

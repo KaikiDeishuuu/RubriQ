@@ -192,6 +192,21 @@ def test_invalid_ocr_settings_are_rejected() -> None:
         _settings(OCR_SPLIT_HEADER_CONCURRENCY=0)
 
 
+def test_badcase_settings_exist_and_have_safe_defaults() -> None:
+    assert settings.badcase_export_max_cases == 500
+    assert 0 < settings.badcase_top_strip_ratio <= 1
+    assert isinstance(settings.badcase_redact_salt, str | type(None))
+
+
+def test_invalid_badcase_settings_are_rejected() -> None:
+    with pytest.raises(ValidationError, match="BADCASE_EXPORT_MAX_CASES"):
+        _settings(BADCASE_EXPORT_MAX_CASES=0)
+    with pytest.raises(ValidationError, match="BADCASE_TOP_STRIP_RATIO"):
+        _settings(BADCASE_TOP_STRIP_RATIO=0)
+    with pytest.raises(ValidationError, match="BADCASE_TOP_STRIP_RATIO"):
+        _settings(BADCASE_TOP_STRIP_RATIO=1.5)
+
+
 def test_invalid_export_settings_are_rejected() -> None:
     with pytest.raises(ValidationError, match="EXPORT_GLOBAL_CONCURRENCY"):
         _settings(EXPORT_GLOBAL_CONCURRENCY=0)

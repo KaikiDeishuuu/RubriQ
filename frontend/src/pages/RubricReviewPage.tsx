@@ -1,10 +1,12 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 
+import { BadCaseReportButton } from '../components/BadCaseReportButton'
 import { DropZone } from '../components/DropZone'
 import { ExamWizardSteps, WizardNav, emptyWizardStatus } from '../components/ExamWizard'
 import { SectionCard } from '../components/SectionCard'
 import { confirmRubric, createRubricItem, deleteRubricItem, fetchStorageBlob, getExam, parseRubricPdf, reopenRubric, updateQuestion, updateRubricItem, uploadRubricPdf } from '../lib/api'
+import { renderedExamFilePagePath } from '../lib/badcases'
 import { formatScore, toClassNames } from '../lib/format'
 import type { ExamDetail, Question, RubricItem } from '../lib/types'
 
@@ -266,6 +268,9 @@ export function RubricReviewPage() {
 		const rubricFiles = exam.files.filter((file) => file.file_type === 'rubric_pdf')
 		return rubricFiles[rubricFiles.length - 1] ?? null
 	}, [exam])
+	const latestRubricPagePaths = latestRubricFile?.page_count
+		? Array.from({ length: latestRubricFile.page_count }, (_, index) => renderedExamFilePagePath(numericExamId, 'rubric', latestRubricFile.id, index + 1))
+		: []
 
 	return (
 		<div className="space-y-6">
@@ -358,7 +363,14 @@ export function RubricReviewPage() {
 							</button>
 						) : null}
 						<div className="rounded-2xl border border-ink-900/10 bg-white px-4 py-3 text-sm leading-6 text-ink-700">
-							解析完成后，请先检查并调整每道题和评分项，再处理学生答卷。
+							{latestRubricPagePaths.length > 0 ? (
+									<div className="mb-3 flex flex-wrap gap-2 rounded-2xl border border-ink-900/10 bg-white/80 p-3">
+										{latestRubricPagePaths.map((path) => (
+											<BadCaseReportButton key={path} imageStoragePath={path} routeKey="vision_rubric" examId={numericExamId} compact />
+										))}
+									</div>
+								) : null}
+								解析完成后，请先检查并调整每道题和评分项，再处理学生答卷。
 						</div>
 					</div>
 				</SectionCard>

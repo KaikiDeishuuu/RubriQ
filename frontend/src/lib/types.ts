@@ -244,6 +244,71 @@ export interface BatchUploadResponse {
   batch: SubmissionBatchDetail
 }
 
+export type BadCaseRouteKey = 'vision_split_header' | 'vision_student_extraction' | 'vision_rubric' | 'vision_roster'
+export type BadCaseStatus = 'pending' | 'triaged' | 'ready' | 'exported' | 'discarded'
+export type BadCaseTriggerSource = 'auto' | 'manual'
+
+export interface BadCase {
+  id: number
+  route_key: BadCaseRouteKey
+  exam_id: number | null
+  submission_id: number | null
+  batch_id: number | null
+  batch_page_id: number | null
+  image_storage_path: string
+  image_hash: string
+  ocr_model: string
+  ocr_raw_text: string
+  ocr_error_message: string | null
+  trigger_reason: string
+  trigger_source: BadCaseTriggerSource
+  reporter_note: string | null
+  ground_truth_text: string | null
+  status: BadCaseStatus
+  redact_pii: boolean
+  last_seen_at: string
+  exported_at: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface BadCaseListResponse {
+  items: BadCase[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface BadCaseCreatePayload {
+  image_storage_path: string
+  route_key: BadCaseRouteKey
+  reporter_note?: string | null
+  exam_id?: number | null
+  submission_id?: number | null
+  batch_id?: number | null
+  batch_page_id?: number | null
+}
+
+export interface BadCaseUpdatePayload {
+  ground_truth_text?: string | null
+  status?: BadCaseStatus | null
+  redact_pii?: boolean | null
+  reporter_note?: string | null
+}
+
+export interface BadCaseStatsItem {
+  route_key: BadCaseRouteKey
+  status: BadCaseStatus
+  count: number
+}
+
+export interface BadCaseRedactionPreview {
+  id: number
+  preview_storage_path: string
+  redaction_method: string
+  redaction_failed: boolean
+}
+
 export interface BatchCandidateUpdatePayload {
   id?: number | null
   candidate_index?: number | null
