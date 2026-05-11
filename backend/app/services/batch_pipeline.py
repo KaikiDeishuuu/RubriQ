@@ -5,6 +5,7 @@ import re
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -75,6 +76,8 @@ COMPLETED_SUBMISSION_STATUSES = {
     SubmissionStatus.graded.value,
     SubmissionStatus.needs_review.value,
 }
+STALE_SUBMISSION_MESSAGE = "Submission processing timed out or worker stopped"
+STALE_BATCH_REVIEW_MESSAGE = "Batch grading review timed out or worker stopped"
 
 
 class BatchPipelineError(RuntimeError):
@@ -128,6 +131,57 @@ def load_batch_detail(session: Session, batch_id: int) -> SubmissionBatch:
     if batch is None:
         raise BatchPipelineError(f"Batch {batch_id} not found")
     return batch
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _as_naive_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def _stale_cutoff(seconds: int) -> datetime:
+    return _as_naive_utc(_utc_now() - timedelta(seconds=seconds))
+
+
+def finalize_stale_active_submissions(session: Session, *, submission_id: int | None = None, batch_id: int | None = None) -> int:
+    cutoff = _stale_cutoff(settings.grading_stale_submission_seconds)
+    filters = [Submission.status.in_(ACTIVE_SUBMISSION_STATUSES), Submission.updated_at < cutoff]
+    if submission_id is not None:
+        filters.append(Submission.id == submission_id)
+    if batch_id is not None:
+        filters.append(Submission.batch_id == batch_id)
+    updated = session.execute(
+        sa_update(Submission)
+        .where(*filters)
+        .values(status=SubmissionStatus.failed.value, error_message=STALE_SUBMISSION_MESSAGE)
+    ).rowcount
+    if updated:
+        session.commit()
+    return updated
+
+
+def finalize_stale_batch_review(session: Session, batch_id: int) -> bool:
+    cutoff = _stale_cutoff(settings.grading_stale_batch_review_seconds)
+    updated = session.execute(
+        sa_update(SubmissionBatch)
+        .where(
+            SubmissionBatch.id == batch_id,
+            SubmissionBatch.ai_review_status.in_({"queued", "running"}),
+            SubmissionBatch.updated_at < cutoff,
+        )
+        .values(
+            ai_review_status="failed",
+            ai_review_error_message=STALE_BATCH_REVIEW_MESSAGE,
+            status=BatchStatus.completed_with_errors.value,
+        )
+    ).rowcount
+    if updated:
+        session.commit()
+    return bool(updated)
 
 
 def list_exam_batches(session: Session, exam_id: int) -> list[SubmissionBatch]:
@@ -312,11 +366,16 @@ def confirm_batch_split(session: Session, batch_id: int) -> BatchConfirmResult:
 
 
 def start_batch_grading(session: Session, batch_id: int) -> tuple[SubmissionBatch, int]:
+    finalize_stale_active_submissions(session, batch_id=batch_id)
+    finalize_stale_batch_review(session, batch_id)
     batch = load_batch_detail(session, batch_id)
-    if batch.status not in {BatchStatus.ready_for_grading.value, BatchStatus.completed_with_errors.value}:
+    if batch.status not in {BatchStatus.ready_for_grading.value, BatchStatus.completed_with_errors.value, BatchStatus.grading.value}:
         raise BatchPipelineError("Batch split must be confirmed before grading")
     _ensure_exam_has_gradable_questions(session, batch.exam_id)
     _ensure_exam_roster_confirmed(session, batch.exam_id)
+    submissions = [submission for submission in batch.submissions if submission.split_confirmed]
+    if batch.status == BatchStatus.grading.value and any(submission.status in ACTIVE_SUBMISSION_STATUSES for submission in submissions):
+        return batch, 0
     queued_count = _dispatch_next_batch_chunk(session, batch, eligible_statuses=STARTABLE_SUBMISSION_STATUSES)
     if queued_count > 0:
         batch.status = BatchStatus.grading.value
@@ -391,6 +450,8 @@ def _ensure_exam_has_gradable_questions(session: Session, exam_id: int) -> None:
 
 
 def refresh_batch_grading_status(session: Session, batch_id: int) -> SubmissionBatch:
+    finalize_stale_active_submissions(session, batch_id=batch_id)
+    finalize_stale_batch_review(session, batch_id)
     batch = load_batch_detail(session, batch_id)
     submissions = [submission for submission in batch.submissions if submission.split_confirmed]
     if not submissions:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -10,6 +12,7 @@ from app.api import deps
 from app.db.base import Base
 from app.main import app
 from app.models import Answer, Exam, Question, Submission, SubmissionStatus
+from app.services import batch_pipeline
 
 
 @pytest.fixture()
@@ -70,6 +73,24 @@ def test_start_submission_processing_does_not_requeue_active_statuses(client_ses
     assert response.status_code == 200
     assert response.json()["status"] == status
     assert queued_ids == []
+
+
+def test_start_submission_processing_requeues_stale_active_status(client_session, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(batch_pipeline.settings, "grading_stale_submission_seconds", 600)
+    test_client, session = client_session
+    submission = _create_submission(session, SubmissionStatus.grading.value)
+    stale_at = datetime.now(timezone.utc) - timedelta(seconds=3600)
+    submission.updated_at = stale_at.replace(tzinfo=None)
+    session.commit()
+    queued_ids: list[int] = []
+    monkeypatch.setattr("app.api.submissions.process_submission_task.delay", queued_ids.append)
+
+    response = test_client.post(f"/api/submissions/{submission.id}/process")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == SubmissionStatus.processing.value
+    assert queued_ids == [submission.id]
+    assert session.get(Submission, submission.id).error_message is None
 
 
 @pytest.mark.parametrize("status", [SubmissionStatus.graded.value, SubmissionStatus.needs_review.value])

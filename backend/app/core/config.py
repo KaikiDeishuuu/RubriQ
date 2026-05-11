@@ -59,6 +59,8 @@ class Settings(BaseSettings):
     ai_grading_concurrency: int = Field(default=4, alias="AI_GRADING_CONCURRENCY")
     ai_grading_global_concurrency: int = Field(default=4, alias="AI_GRADING_GLOBAL_CONCURRENCY")
     ai_grading_batch_size: int = Field(default=5, alias="AI_GRADING_BATCH_SIZE")
+    grading_stale_submission_seconds: int = Field(default=1200, alias="GRADING_STALE_SUBMISSION_SECONDS")
+    grading_stale_batch_review_seconds: int = Field(default=3000, alias="GRADING_STALE_BATCH_REVIEW_SECONDS")
     ai_vision_chain: str | None = Field(default=None, alias="AI_VISION_CHAIN")
     ai_vision_rubric_chain: str | None = Field(default=None, alias="AI_VISION_RUBRIC_CHAIN")
     ai_vision_student_extraction_chain: str | None = Field(default=None, alias="AI_VISION_STUDENT_EXTRACTION_CHAIN")
@@ -112,6 +114,20 @@ class Settings(BaseSettings):
     def _validate_grading_batch_size(cls, value: int) -> int:
         if value < 1 or value > 200:
             raise ValueError("AI_GRADING_BATCH_SIZE must be between 1 and 200")
+        return value
+
+    @field_validator("grading_stale_submission_seconds")
+    @classmethod
+    def _validate_grading_stale_submission_seconds(cls, value: int) -> int:
+        if value < 600:
+            raise ValueError("GRADING_STALE_SUBMISSION_SECONDS must be at least 600")
+        return value
+
+    @field_validator("grading_stale_batch_review_seconds")
+    @classmethod
+    def _validate_grading_stale_batch_review_seconds(cls, value: int) -> int:
+        if value < 1800:
+            raise ValueError("GRADING_STALE_BATCH_REVIEW_SECONDS must be at least 1800")
         return value
 
     @field_validator(

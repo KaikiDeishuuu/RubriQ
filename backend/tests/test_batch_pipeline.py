@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import zipfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import fitz
@@ -580,6 +581,56 @@ def test_refresh_batch_grading_status_marks_completed_with_errors_for_failed_sub
     assert updated_batch.status == BatchStatus.completed_with_errors.value
 
 
+def test_start_batch_grading_requeues_stale_active_submission(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(batch_pipeline.settings, "grading_stale_submission_seconds", 600)
+    exam = _create_exam(session)
+    batch = SubmissionBatch(
+        exam_id=exam.id,
+        mode=BatchUploadMode.zip.value,
+        status=BatchStatus.grading.value,
+        source_filename="batch.zip",
+        source_storage_path="batch.zip",
+    )
+    session.add(batch)
+    session.flush()
+    stale_submission = _create_submission(session, exam.id, batch.id, SubmissionStatus.grading.value)
+    _make_stale(stale_submission)
+    session.commit()
+    queued_ids: list[int] = []
+    monkeypatch.setattr("app.workers.tasks.process_submission_task.delay", queued_ids.append)
+
+    updated_batch, queued_count = start_batch_grading(session, batch.id)
+
+    assert queued_count == 1
+    assert queued_ids == [stale_submission.id]
+    assert updated_batch.status == BatchStatus.grading.value
+    assert session.get(Submission, stale_submission.id).status == SubmissionStatus.processing.value
+
+
+def test_refresh_batch_grading_status_marks_stale_active_submission_failed(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(batch_pipeline.settings, "grading_stale_submission_seconds", 600)
+    exam = _create_exam(session)
+    batch = SubmissionBatch(
+        exam_id=exam.id,
+        mode=BatchUploadMode.zip.value,
+        status=BatchStatus.grading.value,
+        source_filename="batch.zip",
+        source_storage_path="batch.zip",
+    )
+    session.add(batch)
+    session.flush()
+    stale_submission = _create_submission(session, exam.id, batch.id, SubmissionStatus.grading.value)
+    _make_stale(stale_submission)
+    session.commit()
+
+    updated_batch = refresh_batch_grading_status(session, batch.id)
+
+    stored_submission = session.get(Submission, stale_submission.id)
+    assert stored_submission.status == SubmissionStatus.failed.value
+    assert stored_submission.error_message == "Submission processing timed out or worker stopped"
+    assert updated_batch.status == BatchStatus.completed_with_errors.value
+
+
 def test_start_batch_grading_refreshes_status_when_no_submissions_are_queued(session, monkeypatch: pytest.MonkeyPatch) -> None:
     exam = _create_exam(session)
     batch = SubmissionBatch(
@@ -602,6 +653,11 @@ def test_start_batch_grading_refreshes_status_when_no_submissions_are_queued(ses
     assert queued_count == 0
     assert queued_ids == []
     assert updated_batch.status == BatchStatus.completed.value
+
+
+def _make_stale(row, seconds: int = 3600) -> None:
+    stale_at = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+    row.updated_at = stale_at.replace(tzinfo=None)
 
 
 def _create_exam(session) -> Exam:
@@ -892,6 +948,32 @@ def test_batch_variance_review_skips_teacher_reviewed_answers(session, monkeypat
     answer_ids = batch_pipeline._batch_variance_review_answer_ids(session, batch.id)
 
     assert answer_ids == [pending_answer.id]
+
+
+def test_refresh_batch_grading_status_marks_stale_batch_review_failed(session, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(batch_pipeline.settings, "ai_grading_review_enabled", True)
+    monkeypatch.setattr(batch_pipeline.settings, "grading_stale_batch_review_seconds", 1800)
+    exam = _create_exam(session)
+    batch = SubmissionBatch(
+        exam_id=exam.id,
+        mode=BatchUploadMode.zip.value,
+        status=BatchStatus.grading.value,
+        source_filename="batch.zip",
+        source_storage_path="batch.zip",
+        ai_review_status="running",
+    )
+    session.add(batch)
+    session.flush()
+    _create_submission(session, exam.id, batch.id, SubmissionStatus.graded.value)
+    _make_stale(batch, seconds=3600)
+    session.commit()
+
+    updated_batch = refresh_batch_grading_status(session, batch.id)
+
+    stored_batch = session.get(SubmissionBatch, batch.id)
+    assert stored_batch.ai_review_status == "failed"
+    assert stored_batch.ai_review_error_message == "Batch grading review timed out or worker stopped"
+    assert updated_batch.status == BatchStatus.completed_with_errors.value
 
 
 def test_batch_review_failure_stores_sanitized_error(session, monkeypatch: pytest.MonkeyPatch) -> None:
