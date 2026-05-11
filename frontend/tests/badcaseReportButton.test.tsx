@@ -17,3 +17,15 @@ const html = renderToStaticMarkup(
 assert.match(html, /报告 OCR/)
 assert.match(html, /学生答题识别/)
 assert.match(html, /rendered\/submissions\/1\/pages\/page-001\.png/)
+
+const labelledHtml = renderToStaticMarkup(
+  <BadCaseReportButton
+    imageStoragePath="rendered/exams/3/rubric/9/page-003.png"
+    routeKey="vision_rubric"
+    examId={3}
+    label="报告第 3 页 OCR"
+    compact
+  />,
+)
+
+assert.match(labelledHtml, /报告第 3 页 OCR/)
