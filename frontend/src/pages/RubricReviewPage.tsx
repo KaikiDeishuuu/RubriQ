@@ -149,6 +149,14 @@ export function RubricReviewPage() {
 		return parsed
 	}
 
+	function parseOptionalNonNegativeNumber(value: FormDataEntryValue | null, label: string): number | null {
+		const text = String(value ?? '').trim()
+		if (!text) {
+			return 0
+		}
+		return parseNonNegativeNumber(text, label)
+	}
+
 	function parseNonNegativeInteger(value: FormDataEntryValue | null, label: string): number | null {
 		const parsed = Number(value)
 		if (!Number.isInteger(parsed) || parsed < 0) {
@@ -186,7 +194,7 @@ export function RubricReviewPage() {
 	async function handleSaveRubricItem(questionId: number, item: RubricItem, event: FormEvent<HTMLFormElement>) {
 		event.preventDefault()
 		const formData = new FormData(event.currentTarget)
-		const maxScore = parseNonNegativeNumber(formData.get('max_score'), '评分项满分')
+		const maxScore = parseOptionalNonNegativeNumber(formData.get('max_score'), '评分项满分')
 		const orderIndex = parseNonNegativeInteger(formData.get('order_index'), '评分项排序')
 		if (maxScore === null || orderIndex === null) {
 			return
@@ -210,8 +218,9 @@ export function RubricReviewPage() {
 
 	async function handleCreateRubricItem(questionId: number, event: FormEvent<HTMLFormElement>) {
 		event.preventDefault()
-		const formData = new FormData(event.currentTarget)
-		const maxScore = parseNonNegativeNumber(formData.get('max_score'), '评分项满分')
+		const form = event.currentTarget
+		const formData = new FormData(form)
+		const maxScore = parseOptionalNonNegativeNumber(formData.get('max_score'), '评分项满分')
 		const orderIndex = parseNonNegativeInteger(formData.get('order_index'), '评分项排序')
 		if (maxScore === null || orderIndex === null) {
 			return
@@ -224,8 +233,8 @@ export function RubricReviewPage() {
 				keywords: parseKeywords(String(formData.get('keywords') ?? '')),
 				order_index: orderIndex,
 			})
-			event.currentTarget.reset()
-			setFeedback('评分项已添加。')
+			form.reset()
+			setFeedback(maxScore === 0 ? '补充评分说明已添加。' : '评分项已添加。')
 			await loadExam()
 		} catch (error) {
 			setError(error instanceof Error ? error.message : '添加评分项失败')
@@ -524,7 +533,9 @@ function QuestionEditorCard({
 						}}
 					>
 						<label className="block space-y-2">
-							<span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-700">评分说明</span>
+							<span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-700">
+								{item.max_score === 0 ? '补充评分说明 · 不计分' : '评分说明'}
+							</span>
 							<textarea
 								name="description"
 								defaultValue={item.description}
@@ -534,7 +545,7 @@ function QuestionEditorCard({
 						</label>
 						<div className="grid gap-3 lg:grid-cols-12">
 							<label className="block space-y-2 lg:col-span-2">
-								<span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-700">分值</span>
+								<span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-700">分值（可留空）</span>
 								<input
 									name="max_score"
 									type="number"
@@ -591,22 +602,22 @@ function QuestionEditorCard({
 				}}
 			>
 				<label className="block space-y-2">
-					<span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-700">新增评分项 · 评分说明</span>
+					<span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-700">新增评分项 / 补充评分说明</span>
 					<textarea
 						name="description"
-						placeholder="例如：写出关键公式或核心依据"
+						placeholder="例如：公式写出即可，不要求最终数值"
 						rows={2}
 						className="w-full resize-y rounded-2xl border border-ink-900/10 bg-white px-3 py-2 leading-6 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
 					/>
 				</label>
 				<div className="grid gap-3 lg:grid-cols-12">
 					<label className="block space-y-2 lg:col-span-2">
-						<span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-700">分值</span>
+						<span className="text-[11px] font-semibold uppercase tracking-[0.18em] text-ink-700">分值（可选）</span>
 						<input
 							name="max_score"
 							type="number"
 							step="0.1"
-							defaultValue="1"
+							placeholder="留空=不计分说明"
 							className="w-full rounded-2xl border border-ink-900/10 bg-white px-3 py-2 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
 						/>
 					</label>
@@ -634,7 +645,7 @@ function QuestionEditorCard({
 						disabled={disabled}
 						className="rounded-full bg-ink-950 px-5 py-2 text-sm font-semibold text-paper transition hover:bg-ink-800 disabled:cursor-not-allowed disabled:opacity-50"
 					>
-						添加评分项
+						添加评分项/说明
 					</button>
 				</div>
 			</form>

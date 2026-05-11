@@ -149,6 +149,14 @@ def _snapshot_question(question: Question) -> QuestionSnapshot:
     )
 
 
+def _scoring_rubric_items(question: QuestionSnapshot) -> list[RubricItemSnapshot]:
+    return [rubric_item for rubric_item in question.rubric_items if rubric_item.max_score > 0]
+
+
+def _supplemental_rubric_items(question: QuestionSnapshot) -> list[RubricItemSnapshot]:
+    return [rubric_item for rubric_item in question.rubric_items if rubric_item.max_score == 0]
+
+
 def _review_image_paths_from_rendered_pages(pages: list[RenderedPage], source_page: int | None) -> list[Path]:
     if not pages:
         return []
@@ -377,11 +385,12 @@ def process_submission(session: Session, submission_id: int) -> Submission:
         indent=2,
     )
 
+    student_ocr_reference_text = build_ocr_reference_text(rendered_pages, "vision_student_extraction")
     extraction_result, extraction_raw_response = _extract_submission_answers(
         exam_title=exam.title,
         questions_json=question_reference_json,
         image_paths=[page.image_path for page in rendered_pages],
-        ocr_reference_text=build_ocr_reference_text(rendered_pages, "vision_student_extraction"),
+        ocr_reference_text=student_ocr_reference_text,
     )
     if not submission.student_name:
         submission.student_name = extraction_result.student_name
@@ -442,6 +451,7 @@ def process_submission(session: Session, submission_id: int) -> Submission:
                 source_page=sp,
                 extraction_confidence=ec,
                 review_image_paths=_review_image_paths_from_rendered_pages(rendered_pages, sp),
+                review_ocr_reference_text=student_ocr_reference_text,
             ): q
             for sid, q, at, sp, ec in grading_tasks
         }
@@ -520,6 +530,7 @@ def _grade_question(
     source_page: int | None,
     extraction_confidence: ConfidenceLevel,
     review_image_paths: list[Path] | None = None,
+    review_ocr_reference_text: str = "",
 ) -> tuple[Answer, list[AnswerRubricResult], bool]:
     if not answer_text.strip():
         started_at = time.perf_counter()
@@ -568,6 +579,7 @@ def _grade_question(
             image_paths=review_image_paths or [],
             fast_attempt=fast_attempt,
             review_triggers=review_triggers,
+            ocr_reference_text=review_ocr_reference_text,
         )
         if review_attempt is None:
             review_attempt = _call_grading_model(
@@ -627,6 +639,7 @@ def _call_grading_review_with_images(
     image_paths: list[Path],
     fast_attempt: GradingAttempt | None = None,
     review_triggers: list[str] | None = None,
+    ocr_reference_text: str = "",
 ) -> GradingAttempt | None:
     if not image_paths:
         logger.info("Image-grounded grading review skipped question_id=%s reason=skipped_no_image", question.id)
@@ -643,7 +656,13 @@ def _call_grading_review_with_images(
         # the fast pass did.
         strictness = "strict"
         strictness_instructions = _strictness_instructions(strictness)
-        review_input = _build_review_input(question, answer_text, fast_attempt, review_triggers=review_triggers)
+        review_input = _build_review_input(
+            question,
+            answer_text,
+            fast_attempt,
+            review_triggers=review_triggers,
+            ocr_reference_text=ocr_reference_text,
+        )
         completion = call_structured_json(
             model=grading_model,
             system_prompt_name="grading.system.md",
@@ -741,7 +760,8 @@ def _build_grading_attempt(
     model: str,
 ) -> GradingAttempt:
     rubric_results: list[AnswerRubricResult] = []
-    rubric_lookup = {rubric_item.id: rubric_item for rubric_item in question.rubric_items}
+    scoring_items = _scoring_rubric_items(question)
+    rubric_lookup = {rubric_item.id: rubric_item for rubric_item in scoring_items}
     awarded_total = Decimal("0")
     missing_points = list(grading_result.missing_points)
     rubric_item_ids_seen: set[int] = set()
@@ -768,7 +788,7 @@ def _build_grading_attempt(
             )
         )
 
-    for rubric_item in question.rubric_items:
+    for rubric_item in scoring_items:
         if rubric_item.id in rubric_item_ids_seen:
             continue
         missing_rubric_evidence = True
@@ -927,6 +947,8 @@ def _build_answer_from_attempt(
 
 
 def _build_grading_input(question: QuestionSnapshot, answer_text: str) -> dict[str, Any]:
+    scoring_items = _scoring_rubric_items(question)
+    supplemental_items = _supplemental_rubric_items(question)
     return {
         "question_no": question.question_no,
         "question": question.title,
@@ -937,7 +959,15 @@ def _build_grading_input(question: QuestionSnapshot, answer_text: str) -> dict[s
                 "description": rubric_item.description,
                 "max_score": float(rubric_item.max_score),
             }
-            for rubric_item in question.rubric_items
+            for rubric_item in scoring_items
+        ],
+        "supplemental_instructions": [
+            {
+                "id": rubric_item.id,
+                "instruction": rubric_item.description,
+                "priority_order": index,
+            }
+            for index, rubric_item in enumerate(supplemental_items, start=1)
         ],
         "student_answer": answer_text,
     }
@@ -949,11 +979,13 @@ def _build_review_input(
     fast_attempt: GradingAttempt | None,
     *,
     review_triggers: list[str] | None = None,
+    ocr_reference_text: str = "",
 ) -> dict[str, Any]:
     payload = _build_grading_input(question, answer_text)
     payload["answer_text_length"] = len(answer_text.strip())
     payload["formula_like_hint"] = _looks_formula_or_visual(answer_text)
     payload["review_trigger_hints"] = list(review_triggers or [])
+    payload["ocr_reference_text"] = ocr_reference_text.strip()
     if fast_attempt is None:
         payload["fast_pass_score_ratio"] = None
         return payload
@@ -1048,6 +1080,7 @@ def _build_empty_answer_fallback(
     question: QuestionSnapshot,
     source_page: int | None,
 ) -> tuple[Answer, list[AnswerRubricResult], bool]:
+    scoring_items = _scoring_rubric_items(question)
     rubric_results = [
         AnswerRubricResult(
             rubric_item_id=rubric_item.id,
@@ -1055,7 +1088,7 @@ def _build_empty_answer_fallback(
             evidence="",
             reason="未识别到该题的学生答案文本，需要人工复核。",
         )
-        for rubric_item in question.rubric_items
+        for rubric_item in scoring_items
     ]
     answer = Answer(
         submission_id=submission_id,
@@ -1066,7 +1099,7 @@ def _build_empty_answer_fallback(
         max_score=_to_decimal(question.max_score),
         confidence=ConfidenceLevel.low.value,
         ai_comment="未从答卷中识别到该题答案文本，需要人工复核。",
-        missing_points=[rubric_item.description for rubric_item in question.rubric_items],
+        missing_points=[rubric_item.description for rubric_item in scoring_items],
         needs_human_review=True,
         teacher_override_score=None,
         teacher_comment=None,
@@ -1178,6 +1211,7 @@ def _build_error_fallback(
     raw_response: str,
 ) -> tuple[Answer, list[AnswerRubricResult], bool]:
     error_detail = raw_response.replace("ERROR: ", "").strip()
+    scoring_items = _scoring_rubric_items(question)
     rubric_results = [
         AnswerRubricResult(
             rubric_item_id=rubric_item.id,
@@ -1185,7 +1219,7 @@ def _build_error_fallback(
             evidence="",
             reason=f"AI 评分失败：{error_detail}",
         )
-        for rubric_item in question.rubric_items
+        for rubric_item in scoring_items
     ]
     answer = Answer(
         submission_id=submission_id,
@@ -1196,7 +1230,7 @@ def _build_error_fallback(
         max_score=_to_decimal(question.max_score),
         confidence=_combine_confidence(extraction_confidence, ConfidenceLevel.low).value,
         ai_comment="AI 评分失败，需要人工复核。",
-        missing_points=[rubric_item.description for rubric_item in question.rubric_items],
+        missing_points=[rubric_item.description for rubric_item in scoring_items],
         needs_human_review=True,
         teacher_override_score=None,
         teacher_comment=None,

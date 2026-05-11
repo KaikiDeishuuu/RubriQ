@@ -48,8 +48,33 @@ def test_build_grading_input_preserves_payload_shape() -> None:
             {"id": 10, "description": "Point A", "max_score": 2.0},
             {"id": 11, "description": "Point B", "max_score": 3.0},
         ],
+        "supplemental_instructions": [],
         "student_answer": "answer text",
     }
+
+
+def test_build_grading_input_splits_zero_score_supplemental_instructions() -> None:
+    question = QuestionSnapshot(
+        id=5,
+        question_no="1.1",
+        title="Explain the concept",
+        max_score=Decimal("5"),
+        rubric_items=[
+            RubricItemSnapshot(id=10, description="Point A", max_score=Decimal("2")),
+            RubricItemSnapshot(id=12, description="公式写出即可，不要求最终数值", max_score=Decimal("0")),
+            RubricItemSnapshot(id=11, description="Point B", max_score=Decimal("3")),
+        ],
+    )
+
+    payload = _build_grading_input(question, "answer text")
+
+    assert payload["rubric_items"] == [
+        {"id": 10, "description": "Point A", "max_score": 2.0},
+        {"id": 11, "description": "Point B", "max_score": 3.0},
+    ]
+    assert payload["supplemental_instructions"] == [
+        {"id": 12, "instruction": "公式写出即可，不要求最终数值", "priority_order": 1},
+    ]
 
 
 def test_strictness_instructions_returns_known_modes_and_empty_unknown() -> None:
@@ -58,6 +83,33 @@ def test_strictness_instructions_returns_known_modes_and_empty_unknown() -> None
     assert "Grade fairly" in _strictness_instructions("moderate")
     assert "Grade strictly" in _strictness_instructions("strict")
     assert _strictness_instructions("unknown") == ""
+
+
+def test_build_grading_attempt_ignores_supplemental_instructions_for_missing_evidence() -> None:
+    question = QuestionSnapshot(
+        id=5,
+        question_no="1.1",
+        title="Explain the concept",
+        max_score=Decimal("2"),
+        rubric_items=[
+            RubricItemSnapshot(id=10, description="Point A", max_score=Decimal("2")),
+            RubricItemSnapshot(id=12, description="公式写出即可，不要求最终数值", max_score=Decimal("0")),
+        ],
+    )
+
+    attempt = pipeline._build_grading_attempt(
+        question=question,
+        answer_text="student attempted point A",
+        extraction_confidence=ConfidenceLevel.high,
+        grading_result=_grading_result(score=2, evidence="student attempted point A"),
+        raw_response="{}",
+        model="model",
+    )
+
+    assert attempt.score == Decimal("2.0")
+    assert attempt.missing_rubric_evidence is False
+    assert [result.rubric_item_id for result in attempt.rubric_results] == [10]
+    assert "公式写出即可，不要求最终数值" not in attempt.missing_points
 
 
 def test_strictness_policy_does_not_lift_unsupported_non_empty_answer(monkeypatch) -> None:
@@ -303,6 +355,28 @@ def test_build_review_input_includes_image_review_hints() -> None:
     assert payload["review_trigger_hints"] == ["formula_like_answer", "low_score_non_empty"]
 
 
+def test_build_review_input_includes_ocr_reference_text() -> None:
+    question = _question_snapshot()
+    attempt = pipeline._build_grading_attempt(
+        question=question,
+        answer_text="会造成厚度计算的错误",
+        extraction_confidence=ConfidenceLevel.medium,
+        grading_result=_grading_result(score=0, evidence="会造成厚度计算的错误"),
+        raw_response="{}",
+        model="model",
+    )
+
+    payload = pipeline._build_review_input(
+        question,
+        "会造成厚度计算的错误",
+        attempt,
+        ocr_reference_text="[Page 2]\n会远小于原来计算的厚度",
+        review_triggers=["ocr_vision_mismatch_suspected"],
+    )
+
+    assert payload["ocr_reference_text"] == "[Page 2]\n会远小于原来计算的厚度"
+
+
 def test_grade_question_uses_image_review_for_non_empty_zero_score(monkeypatch) -> None:
     question = _question_snapshot()
     image_path = Path("page.png")
@@ -335,6 +409,7 @@ def test_grade_question_uses_image_review_for_non_empty_zero_score(monkeypatch) 
         source_page=1,
         extraction_confidence=ConfidenceLevel.high,
         review_image_paths=[image_path],
+        review_ocr_reference_text="[Page 1]\nx^2 + 2x = 0",
     )
 
     assert answer.review_decision == "accepted_review"
@@ -342,6 +417,8 @@ def test_grade_question_uses_image_review_for_non_empty_zero_score(monkeypatch) 
     assert "formula_like_answer" in answer.review_triggers
     assert seen_route_keys == ["grading", "vision_grading_review"]
     assert '"review_trigger_hints"' in seen_review_payloads[0]
+    assert '"ocr_reference_text"' in seen_review_payloads[0]
+    assert "x^2 + 2x = 0" in seen_review_payloads[0]
 
 
 def test_grade_question_uses_image_grounded_review_before_text_review(monkeypatch) -> None:

@@ -17,6 +17,7 @@ import {
   uploadBatch,
   uploadSubmissions,
 } from '../lib/api'
+import { confirmAllCandidateDrafts } from '../lib/batchCandidates'
 import { formatScore, isSubmissionActive, toClassNames } from '../lib/format'
 import type {
   BatchCandidateUpdatePayload,
@@ -293,6 +294,11 @@ export function SubmissionUploadPage() {
     setFeedback('已按名单顺序自动绑定，记得保存。')
   }
 
+  function handleConfirmAllCandidates() {
+    setCandidateDrafts((current) => confirmAllCandidateDrafts(current))
+    setFeedback('已确认所有未忽略候选，记得保存。')
+  }
+
   const exam = results?.exam
   const selectedTab = BATCH_TABS.find((tab) => tab.mode === activeTab) ?? BATCH_TABS[0]
   const batchPages = activeBatch?.pages.map((page) => ({ label: `Page ${page.page_no}`, storagePath: page.image_path })) ?? []
@@ -468,6 +474,14 @@ export function SubmissionUploadPage() {
                     className="rounded-full border border-slateBlue-200 bg-slateBlue-50 px-4 py-2 text-xs font-semibold text-slateBlue-500 transition hover:bg-slateBlue-100 disabled:opacity-50"
                   >
                     按名单顺序自动绑定
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleConfirmAllCandidates}
+                    disabled={batchBusy || activeCandidateDrafts.length === 0}
+                    className="rounded-full border border-sage-200 bg-sage-50 px-4 py-2 text-xs font-semibold text-sage-500 transition hover:bg-sage-100 disabled:opacity-50"
+                  >
+                    一键确认所有候选
                   </button>
                   <button
                     type="button"

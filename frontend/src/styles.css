@@ -37,6 +37,14 @@ select {
   background: rgba(49, 73, 178, 0.18);
 }
 
+.sidebar-scrollbar {
+  scrollbar-width: none;
+}
+
+.sidebar-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
 @keyframes workflow-pulse {
   0%, 100% {
     opacity: 1;
