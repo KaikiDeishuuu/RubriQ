@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import React, { useEffect, useState } from 'react'
 
 import { AuthenticatedImage } from './AuthenticatedImage'
 import { toClassNames } from '../lib/format'
@@ -9,9 +9,10 @@ interface PreviewPanelProps {
   pages: Array<{ label: string; storagePath: string }>
   activeIndex: number
   onChange: (index: number) => void
+  action?: React.ReactNode
 }
 
-export function PreviewPanel({ title, description, pages, activeIndex, onChange }: PreviewPanelProps) {
+export function PreviewPanel({ title, description, pages, activeIndex, onChange, action }: PreviewPanelProps) {
   const activePage = pages[activeIndex]
   const [lightboxOpen, setLightboxOpen] = useState(false)
   const [zoom, setZoom] = useState(1)
@@ -56,8 +57,11 @@ export function PreviewPanel({ title, description, pages, activeIndex, onChange 
           <h3 className="font-display text-2xl text-ink-950">{title}</h3>
           {description ? <p className="mt-2 text-sm text-ink-700">{description}</p> : null}
         </div>
-        <div className="rounded-full bg-ink-950 px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-paper">
-          共 {pages.length} 页
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+          {action}
+          <div className="rounded-full bg-ink-950 px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-paper">
+            共 {pages.length} 页
+          </div>
         </div>
       </div>
       {activePage ? (

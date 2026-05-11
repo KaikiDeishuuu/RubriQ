@@ -269,7 +269,10 @@ export function RubricReviewPage() {
 		return rubricFiles[rubricFiles.length - 1] ?? null
 	}, [exam])
 	const latestRubricPagePaths = latestRubricFile?.page_count
-		? Array.from({ length: latestRubricFile.page_count }, (_, index) => renderedExamFilePagePath(numericExamId, 'rubric', latestRubricFile.id, index + 1))
+		? Array.from({ length: latestRubricFile.page_count }, (_, index) => ({
+			pageNo: index + 1,
+			path: renderedExamFilePagePath(numericExamId, 'rubric', latestRubricFile.id, index + 1),
+		}))
 		: []
 
 	return (
@@ -365,8 +368,15 @@ export function RubricReviewPage() {
 						<div className="rounded-2xl border border-ink-900/10 bg-white px-4 py-3 text-sm leading-6 text-ink-700">
 							{latestRubricPagePaths.length > 0 ? (
 									<div className="mb-3 flex flex-wrap gap-2 rounded-2xl border border-ink-900/10 bg-white/80 p-3">
-										{latestRubricPagePaths.map((path) => (
-											<BadCaseReportButton key={path} imageStoragePath={path} routeKey="vision_rubric" examId={numericExamId} compact />
+										{latestRubricPagePaths.map((page) => (
+											<BadCaseReportButton
+												key={page.path}
+												imageStoragePath={page.path}
+												routeKey="vision_rubric"
+												examId={numericExamId}
+												label={`报告第 ${page.pageNo} 页 OCR`}
+												compact
+											/>
 										))}
 									</div>
 								) : null}

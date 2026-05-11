@@ -13,6 +13,7 @@ interface BadCaseReportButtonProps {
   batchId?: number | null
   batchPageId?: number | null
   compact?: boolean
+  label?: string
 }
 
 export function BadCaseReportButton({
@@ -23,6 +24,7 @@ export function BadCaseReportButton({
   batchId = null,
   batchPageId = null,
   compact = false,
+  label = '报告 OCR',
 }: BadCaseReportButtonProps) {
   const [open, setOpen] = useState(false)
   const [note, setNote] = useState('')
@@ -69,7 +71,7 @@ export function BadCaseReportButton({
         )}
         title={`${formatBadCaseRoute(routeKey)} · ${imageStoragePath}`}
       >
-        {reported ? '已上报' : '报告 OCR'}
+        {reported ? '已上报' : label}
       </button>
 
       {open ? (

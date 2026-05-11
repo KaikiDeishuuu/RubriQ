@@ -464,9 +464,7 @@ export function SubmissionUploadPage() {
                       pages={batchPages}
                       activeIndex={activePageIndex}
                       onChange={setActivePageIndex}
-                    />
-                    {activeBatch.pages[activePageIndex] ? (
-                      <div className="flex justify-end">
+                      action={activeBatch.pages[activePageIndex] ? (
                         <BadCaseReportButton
                           imageStoragePath={activeBatch.pages[activePageIndex].image_path}
                           routeKey="vision_split_header"
@@ -475,8 +473,8 @@ export function SubmissionUploadPage() {
                           batchPageId={activeBatch.pages[activePageIndex].id}
                           compact
                         />
-                      </div>
-                    ) : null}
+                      ) : null}
+                    />
                   </>
                 ) : null}
                 <CandidateEditor candidates={activeBatch.candidates} drafts={candidateDrafts} rosterEntries={results?.exam.roster_entries ?? []} onChange={updateDraft} />

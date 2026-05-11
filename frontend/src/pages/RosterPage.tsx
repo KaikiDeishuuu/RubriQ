@@ -187,7 +187,10 @@ export function RosterPage() {
     return rosterFiles[rosterFiles.length - 1] ?? null
   }, [exam])
   const latestRosterPagePaths = latestRosterFile?.page_count
-    ? Array.from({ length: latestRosterFile.page_count }, (_, index) => renderedExamFilePagePath(numericExamId, 'roster', latestRosterFile.id, index + 1))
+    ? Array.from({ length: latestRosterFile.page_count }, (_, index) => ({
+        pageNo: index + 1,
+        path: renderedExamFilePagePath(numericExamId, 'roster', latestRosterFile.id, index + 1),
+      }))
     : []
 
   return (
@@ -251,8 +254,15 @@ export function RosterPage() {
             />
             {latestRosterPagePaths.length > 0 ? (
               <div className="flex flex-wrap gap-2 rounded-2xl border border-ink-900/10 bg-white/80 p-3">
-                {latestRosterPagePaths.map((path) => (
-                  <BadCaseReportButton key={path} imageStoragePath={path} routeKey="vision_roster" examId={numericExamId} compact />
+                {latestRosterPagePaths.map((page) => (
+                  <BadCaseReportButton
+                    key={page.path}
+                    imageStoragePath={page.path}
+                    routeKey="vision_roster"
+                    examId={numericExamId}
+                    label={`报告第 ${page.pageNo} 页 OCR`}
+                    compact
+                  />
                 ))}
               </div>
             ) : null}

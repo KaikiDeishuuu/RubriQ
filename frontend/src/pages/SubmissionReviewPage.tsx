@@ -425,9 +425,7 @@ export function SubmissionReviewPage() {
               pages={pages}
               activeIndex={selectedPageIndex}
               onChange={setSelectedPageIndex}
-            />
-            {pages[selectedPageIndex] ? (
-              <div className="flex justify-end">
+              action={pages[selectedPageIndex] ? (
                 <BadCaseReportButton
                   imageStoragePath={pages[selectedPageIndex].storagePath}
                   routeKey="vision_student_extraction"
@@ -435,8 +433,8 @@ export function SubmissionReviewPage() {
                   submissionId={submission.id}
                   compact
                 />
-              </div>
-            ) : null}
+              ) : null}
+            />
           </div>
 
           <div className="space-y-6 min-w-0">
