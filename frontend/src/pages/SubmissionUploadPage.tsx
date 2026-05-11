@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
+import { BadCaseReportButton } from '../components/BadCaseReportButton'
 import { DropZone } from '../components/DropZone'
 import { ExamWizardSteps, WizardNav, emptyWizardStatus } from '../components/ExamWizard'
 import { PreviewPanel } from '../components/PreviewPanel'
@@ -456,13 +457,27 @@ export function SubmissionUploadPage() {
                   <InlineMessage message={`暂不能开始批量批改：${batchGradingDisabledReason}。`} tone="warning" />
                 ) : null}
                 {batchPages.length > 0 ? (
-                  <PreviewPanel
-                    title="页面预览"
-                    description="检查每页是否归入正确学生答卷。"
-                    pages={batchPages}
-                    activeIndex={activePageIndex}
-                    onChange={setActivePageIndex}
-                  />
+                  <>
+                    <PreviewPanel
+                      title="页面预览"
+                      description="检查每页是否归入正确学生答卷。"
+                      pages={batchPages}
+                      activeIndex={activePageIndex}
+                      onChange={setActivePageIndex}
+                    />
+                    {activeBatch.pages[activePageIndex] ? (
+                      <div className="flex justify-end">
+                        <BadCaseReportButton
+                          imageStoragePath={activeBatch.pages[activePageIndex].image_path}
+                          routeKey="vision_split_header"
+                          examId={numericExamId}
+                          batchId={activeBatch.id}
+                          batchPageId={activeBatch.pages[activePageIndex].id}
+                          compact
+                        />
+                      </div>
+                    ) : null}
+                  </>
                 ) : null}
                 <CandidateEditor candidates={activeBatch.candidates} drafts={candidateDrafts} rosterEntries={results?.exam.roster_entries ?? []} onChange={updateDraft} />
                 {validationError ? <InlineMessage message={validationError} tone="error" /> : null}

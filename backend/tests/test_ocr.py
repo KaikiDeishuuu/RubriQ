@@ -60,6 +60,32 @@ def test_parse_paddle_jsonl_extracts_markdown_text() -> None:
     assert [(page.page_no, page.text) for page in pages] == [(1, "第一页"), (2, "第二页")]
 
 
+def test_parse_paddle_jsonl_extracts_regions_from_bbox_like_payload() -> None:
+    text = json.dumps(
+        {
+            "result": {
+                "layoutParsingResults": [
+                    {
+                        "markdown": {"text": "姓名 张三 学号 123456"},
+                        "prunedResult": {
+                            "layoutParsingResults": [
+                                {"text": "姓名 张三", "bbox": [10, 20, 110, 50]},
+                                {"text": "学号 123456", "box": [[10, 60], [160, 60], [160, 90], [10, 90]]},
+                            ]
+                        },
+                    }
+                ]
+            }
+        }
+    )
+
+    pages = parse_paddle_jsonl(text)
+
+    assert pages[0].regions[0].text == "姓名 张三"
+    assert pages[0].regions[0].bbox == [10, 20, 110, 50]
+    assert pages[0].regions[1].bbox == [10, 60, 160, 90]
+
+
 def test_paddle_ocr_client_submit_poll_and_fetch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     image_path = tmp_path / "page.png"
     image_path.write_bytes(b"fake-image")
@@ -135,6 +161,30 @@ def test_cached_or_extract_text_uses_cache(monkeypatch: pytest.MonkeyPatch, tmp_
         get_storage_service.cache_clear()
 
 
+def test_cached_text_reads_missing_regions_as_empty(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
+    from app.storage.local import get_storage_service
+
+    get_storage_service.cache_clear()
+    image_path = tmp_path / "page.png"
+    image_path.write_bytes(b"fake-image")
+    cache_dir = settings.storage_dir / "ocr-cache"
+    cache_dir.mkdir(parents=True)
+    cache_path = cache_dir / f"{ocr.hash_file(image_path)}.json"
+    cache_path.write_text(
+        json.dumps({"provider": "paddle", "model": settings.paddle_ocr_model, "text": "cached"}),
+        encoding="utf-8",
+    )
+    try:
+        cached = ocr.read_cached_ocr_result(image_path)
+    finally:
+        get_storage_service.cache_clear()
+
+    assert cached is not None
+    assert cached.text == "cached"
+    assert cached.regions == []
+
+
 def test_build_ocr_reference_text_uses_pdf_text_before_provider(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     page = SimpleNamespace(page_no=1, image_path=tmp_path / "page.png", extracted_text="A" * 100)
     monkeypatch.setattr(settings, "ocr_preprocess_enabled", True)
@@ -146,3 +196,39 @@ def test_build_ocr_reference_text_uses_pdf_text_before_provider(monkeypatch: pyt
 
     assert "[Page 1]" in reference
     assert "A" * 20 in reference
+
+
+def test_build_ocr_reference_text_enqueues_failed_page_when_context_is_available(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
+    from app.storage.local import get_storage_service
+
+    get_storage_service.cache_clear()
+    storage = get_storage_service()
+    image_path = storage.path_for("rendered/submissions/1/pages/page-001.png")
+    image_path.parent.mkdir(parents=True)
+    image_path.write_bytes(b"fake-image")
+    page = SimpleNamespace(page_no=1, image_path=image_path, extracted_text="")
+    calls: list[dict] = []
+    monkeypatch.setattr(settings, "ocr_preprocess_enabled", True)
+    monkeypatch.setattr(settings, "paddle_ocr_api_key", "secret-key")
+    monkeypatch.setattr(PaddleOCRClient, "extract_image_text", lambda *_args, **_kwargs: (_ for _ in ()).throw(OCRError("provider down")))
+    monkeypatch.setattr(ocr.bad_cases, "enqueue", lambda _session=None, **kwargs: calls.append(kwargs) or 1)
+
+    try:
+        reference = ocr.build_ocr_reference_text(
+            [page],
+            "vision_student_extraction",
+            session=object(),
+            exam_id=2,
+            submission_id=1,
+        )
+    finally:
+        get_storage_service.cache_clear()
+
+    assert reference == ""
+    assert calls[0]["route_key"] == "vision_student_extraction"
+    assert calls[0]["trigger_reason"] == "ocr_request_failed"
+    assert calls[0]["ocr_error_message"] == "provider down"
+    assert calls[0]["image_storage_path"] == "rendered/submissions/1/pages/page-001.png"
+    assert calls[0]["exam_id"] == 2
+    assert calls[0]["submission_id"] == 1

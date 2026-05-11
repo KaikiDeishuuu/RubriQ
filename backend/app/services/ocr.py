@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 
 from app.core.config import AIRouteKey, settings
+from app.services import bad_cases
 from app.services.pdf import RenderedPage, hash_file
 from app.storage.local import get_storage_service
 
@@ -22,10 +23,23 @@ class OCRError(RuntimeError):
 
 
 @dataclass(slots=True)
+class OCRRegion:
+    text: str
+    bbox: list[int]
+
+
+@dataclass(slots=True)
 class OCRPageText:
     page_no: int
     text: str
     source: str = "paddle"
+    regions: list[OCRRegion] | None = None
+
+
+@dataclass(slots=True)
+class CachedOCRResult:
+    text: str
+    regions: list[OCRRegion]
 
 
 @dataclass(slots=True)
@@ -64,13 +78,14 @@ class PaddleOCRClient:
         json_url = self.poll_job(job_id)
         page_texts = self.fetch_jsonl_result(json_url)
         text = "\n\n".join(page.text for page in page_texts if page.text.strip()).strip()
+        regions = [region for page in page_texts for region in page.regions or []]
         logger.info(
             "PaddleOCR image completed job=%s duration_seconds=%.2f text_chars=%s",
             _safe_job_id(job_id),
             time.perf_counter() - started_at,
             len(text),
         )
-        return OCRPageText(page_no=1, text=text, source="paddle")
+        return OCRPageText(page_no=1, text=text, source="paddle", regions=regions or None)
 
     def submit_image(self, image_path: Path) -> str:
         if not settings.paddle_ocr_api_key:
@@ -149,17 +164,37 @@ def parse_paddle_jsonl(text: str) -> list[OCRPageText]:
             markdown = layout_result.get("markdown") or {}
             markdown_text = str(markdown.get("text") or "").strip()
             if markdown_text:
-                page_texts.append(OCRPageText(page_no=page_no, text=markdown_text, source="paddle"))
+                page_texts.append(
+                    OCRPageText(
+                        page_no=page_no,
+                        text=markdown_text,
+                        source="paddle",
+                        regions=_extract_regions(layout_result) or None,
+                    )
+                )
                 page_no += 1
     return page_texts
 
 
-def build_ocr_reference_text(pages: list[RenderedPage], route_key: AIRouteKey) -> str:
+def build_ocr_reference_text(
+    pages: list[RenderedPage],
+    route_key: AIRouteKey,
+    *,
+    session=None,
+    exam_id: int | None = None,
+    submission_id: int | None = None,
+) -> str:
     if not settings.ocr_enabled_for_route(route_key):
         return ""
     reference_pages: list[OCRPageText] = []
     for page in pages:
-        text = _best_text_for_page(page)
+        text = _best_text_for_page(
+            page,
+            route_key=route_key,
+            session=session,
+            exam_id=exam_id,
+            submission_id=submission_id,
+        )
         if text:
             reference_pages.append(OCRPageText(page_no=page.page_no, text=text, source="paddle_or_pdf"))
     return OCRResult(reference_pages).combined_text
@@ -198,7 +233,14 @@ def extract_header_text_diagnostic(image_path: Path, page_hash: str | None = Non
     return HeaderOCRDiagnostic(text=stripped, reason="ocr_text_extracted", text_chars=len(stripped), cache_hit=cache_hit)
 
 
-def _best_text_for_page(page: RenderedPage) -> str:
+def _best_text_for_page(
+    page: RenderedPage,
+    *,
+    route_key: AIRouteKey,
+    session=None,
+    exam_id: int | None = None,
+    submission_id: int | None = None,
+) -> str:
     pdf_text = page.extracted_text.strip()
     if len(pdf_text) >= settings.ocr_min_text_chars_for_reference:
         return pdf_text
@@ -206,7 +248,28 @@ def _best_text_for_page(page: RenderedPage) -> str:
         ocr_text = _cached_or_extract_text(page.image_path).strip()
     except OCRError as exc:
         logger.warning("PaddleOCR page extraction failed; using PDF text/vision fallback: %s", exc)
+        _enqueue_page_bad_case(
+            session,
+            page=page,
+            route_key=route_key,
+            ocr_raw_text="",
+            ocr_error_message=str(exc),
+            trigger_reason="ocr_request_failed",
+            exam_id=exam_id,
+            submission_id=submission_id,
+        )
         return pdf_text
+    if not ocr_text:
+        _enqueue_page_bad_case(
+            session,
+            page=page,
+            route_key=route_key,
+            ocr_raw_text="",
+            ocr_error_message=None,
+            trigger_reason="ocr_empty_text",
+            exam_id=exam_id,
+            submission_id=submission_id,
+        )
     return ocr_text or pdf_text
 
 
@@ -217,15 +280,15 @@ def _cached_or_extract_text(image_path: Path, page_hash: str | None = None) -> s
 
 def _cached_or_extract_text_with_cache_status(image_path: Path, page_hash: str | None = None) -> tuple[str, bool]:
     cache_path = _cache_path_for_image(image_path, page_hash=page_hash)
-    cached_text = _read_cached_text(cache_path)
-    if cached_text is not None:
-        return cached_text, True
+    cached_result = _read_cached_result(cache_path)
+    if cached_result is not None:
+        return cached_result.text, True
     client = PaddleOCRClient()
     try:
         result = client.extract_image_text(image_path)
     finally:
         client.close()
-    _write_cached_text(cache_path, image_path=image_path, text=result.text)
+    _write_cached_text(cache_path, image_path=image_path, text=result.text, regions=result.regions)
     return result.text, False
 
 
@@ -237,7 +300,16 @@ def _cache_path_for_image(image_path: Path, page_hash: str | None = None) -> Pat
     return cache_dir / f"{source_hash}.json"
 
 
+def read_cached_ocr_result(image_path: Path, page_hash: str | None = None) -> CachedOCRResult | None:
+    return _read_cached_result(_cache_path_for_image(image_path, page_hash=page_hash))
+
+
 def _read_cached_text(cache_path: Path) -> str | None:
+    cached_result = _read_cached_result(cache_path)
+    return cached_result.text if cached_result is not None else None
+
+
+def _read_cached_result(cache_path: Path) -> CachedOCRResult | None:
     if not cache_path.exists():
         return None
     try:
@@ -247,18 +319,98 @@ def _read_cached_text(cache_path: Path) -> str | None:
     if payload.get("provider") != "paddle" or payload.get("model") != settings.paddle_ocr_model:
         return None
     text = payload.get("text")
-    return text if isinstance(text, str) else None
+    if not isinstance(text, str):
+        return None
+    regions = [_region_from_payload(region) for region in payload.get("regions") or []]
+    return CachedOCRResult(text=text, regions=[region for region in regions if region is not None])
 
 
-def _write_cached_text(cache_path: Path, *, image_path: Path, text: str) -> None:
+def _write_cached_text(
+    cache_path: Path,
+    *,
+    image_path: Path,
+    text: str,
+    regions: list[OCRRegion] | None = None,
+) -> None:
     payload: dict[str, Any] = {
         "provider": "paddle",
         "model": settings.paddle_ocr_model,
         "image_name": image_path.name,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "text": text,
+        "regions": [
+            {"text": region.text, "bbox": region.bbox}
+            for region in regions or []
+        ],
     }
     cache_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _enqueue_page_bad_case(
+    session,
+    *,
+    page: RenderedPage,
+    route_key: AIRouteKey,
+    ocr_raw_text: str,
+    ocr_error_message: str | None,
+    trigger_reason: str,
+    exam_id: int | None,
+    submission_id: int | None,
+) -> None:
+    if session is None:
+        return
+    try:
+        storage = get_storage_service()
+        image_storage_path = storage.relative_path_for(page.image_path)
+    except ValueError:
+        return
+    bad_cases.enqueue(
+        session,
+        route_key=route_key,
+        image_storage_path=image_storage_path,
+        ocr_raw_text=ocr_raw_text,
+        ocr_error_message=ocr_error_message,
+        trigger_reason=trigger_reason,
+        image_hash=hash_file(page.image_path),
+        exam_id=exam_id,
+        submission_id=submission_id,
+    )
+
+
+def _extract_regions(value: Any) -> list[OCRRegion]:
+    regions: list[OCRRegion] = []
+    if isinstance(value, dict):
+        text = str(value.get("text") or value.get("recText") or "").strip()
+        bbox = _bbox_from_value(value.get("bbox") or value.get("box") or value.get("poly") or value.get("polygon"))
+        if text and bbox:
+            regions.append(OCRRegion(text=text, bbox=bbox))
+        for nested in value.values():
+            regions.extend(_extract_regions(nested))
+    elif isinstance(value, list):
+        for item in value:
+            regions.extend(_extract_regions(item))
+    return regions
+
+
+def _bbox_from_value(value: Any) -> list[int] | None:
+    if isinstance(value, list) and len(value) == 4 and all(isinstance(item, (int, float)) for item in value):
+        x1, y1, x2, y2 = value
+        return [int(x1), int(y1), int(x2), int(y2)]
+    if isinstance(value, list) and value and all(isinstance(point, list) and len(point) >= 2 for point in value):
+        xs = [float(point[0]) for point in value]
+        ys = [float(point[1]) for point in value]
+        return [int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys))]
+    return None
+
+
+def _region_from_payload(value: Any) -> OCRRegion | None:
+    if not isinstance(value, dict):
+        return None
+    text = value.get("text")
+    bbox = _bbox_from_value(value.get("bbox"))
+    if not isinstance(text, str) or bbox is None:
+        return None
+    return OCRRegion(text=text, bbox=bbox)
 
 
 def _safe_job_id(job_id: str) -> str:

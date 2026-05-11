@@ -265,7 +265,12 @@ def parse_rubric_for_exam(session: Session, exam_id: int, exam_file_id: int | No
         dpi=settings.render_dpi,
     )
     ocr_started_at = time.perf_counter()
-    ocr_reference_text = build_ocr_reference_text(rendered_pages, "vision_rubric")
+    ocr_reference_text = build_ocr_reference_text(
+        rendered_pages,
+        "vision_rubric",
+        session=session,
+        exam_id=exam.id,
+    )
     if ocr_reference_text:
         logger.info(
             "Rubric OCR reference built exam_id=%s pages=%s chars=%s duration_seconds=%.2f",
@@ -385,7 +390,13 @@ def process_submission(session: Session, submission_id: int) -> Submission:
         indent=2,
     )
 
-    student_ocr_reference_text = build_ocr_reference_text(rendered_pages, "vision_student_extraction")
+    student_ocr_reference_text = build_ocr_reference_text(
+        rendered_pages,
+        "vision_student_extraction",
+        session=session,
+        exam_id=exam.id,
+        submission_id=submission.id,
+    )
     extraction_result, extraction_raw_response = _extract_submission_answers(
         exam_title=exam.title,
         questions_json=question_reference_json,

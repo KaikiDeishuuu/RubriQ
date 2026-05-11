@@ -1,6 +1,12 @@
 import type {
   Answer,
   AnswerRubricResult,
+  BadCase,
+  BadCaseCreatePayload,
+  BadCaseListResponse,
+  BadCaseRedactionPreview,
+  BadCaseStatsItem,
+  BadCaseUpdatePayload,
   BatchCandidateUpdatePayload,
   BatchConfirmResponse,
   BatchStartGradingResponse,
@@ -27,8 +33,10 @@ import type {
   SubmissionUploadResponse,
   TeacherFinalizedUpdatePayload,
 } from './types'
+import type { BadCaseFilters } from './badcases'
+import { buildBadCaseQuery } from './badcases'
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000/api'
+const API_BASE_URL = import.meta.env?.VITE_API_BASE_URL ?? 'http://localhost:8000/api'
 const TOKEN_STORAGE_KEY = 'quizocr_admin_token'
 
 export class AuthRequiredError extends Error {
@@ -328,6 +336,46 @@ export async function overrideAnswer(answerId: number, payload: SubmissionOverri
 
 export async function getResults(examId: number): Promise<ExamResultsResponse> {
   return request<ExamResultsResponse>(`/exams/${examId}/results`)
+}
+
+export async function listBadCases(filters: BadCaseFilters = {}): Promise<BadCaseListResponse> {
+  return request<BadCaseListResponse>(`/badcases${buildBadCaseQuery(filters)}`)
+}
+
+export async function getBadCase(id: number): Promise<BadCase> {
+  return request<BadCase>(`/badcases/${id}`)
+}
+
+export async function createBadCase(payload: BadCaseCreatePayload): Promise<BadCase> {
+  return request<BadCase>('/badcases', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function updateBadCase(id: number, payload: BadCaseUpdatePayload): Promise<BadCase> {
+  return request<BadCase>(`/badcases/${id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function deleteBadCase(id: number): Promise<void> {
+  await request<void>(`/badcases/${id}`, { method: 'DELETE' })
+}
+
+export async function previewBadCaseRedaction(id: number): Promise<BadCaseRedactionPreview> {
+  return request<BadCaseRedactionPreview>(`/badcases/${id}/redact-preview`, { method: 'POST' })
+}
+
+export async function exportBadCasesZip(filters: Pick<BadCaseFilters, 'route_key'> = {}): Promise<Blob> {
+  return fetchBlob(`/badcases/export.zip${buildBadCaseQuery(filters)}`)
+}
+
+export async function getBadCaseStats(): Promise<BadCaseStatsItem[]> {
+  return request<BadCaseStatsItem[]>('/badcases/stats')
 }
 
 export async function exportResultsCsv(examId: number): Promise<Blob> {

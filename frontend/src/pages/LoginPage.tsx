@@ -76,7 +76,7 @@ export function LoginPage() {
       <section className="w-full max-w-md rounded-3xl border border-ink-900/10 bg-white p-8 shadow-soft">
         <h1 className="font-display text-3xl text-ink-950">QuizOCR 管理员登录</h1>
         <p className="mt-2 text-sm text-ink-700">
-          请使用部署管理员配置的 <code className="rounded bg-paper px-1 py-0.5 font-mono text-xs">ADMIN_API_TOKEN</code> 登录。
+          请输入部署管理员提供的管理员密钥登录。
         </p>
         {authRequired === false ? (
           <p className="mt-4 rounded-2xl bg-sage-50 px-4 py-3 text-sm text-sage-600">

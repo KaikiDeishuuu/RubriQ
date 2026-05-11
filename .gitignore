@@ -21,6 +21,10 @@ frontend/dist/
 
 # Claude
 .claude/
+.playwright-mcp/
+
+# Sensitive examples
+example/**/*.pdf
 
 # Misc
 .DS_Store

@@ -204,7 +204,12 @@ def parse_roster_pdf(session: Session, exam_id: int, exam_file_id: int | None = 
         dpi=settings.render_dpi,
     )
     ocr_started_at = time.perf_counter()
-    ocr_reference_text = build_ocr_reference_text(rendered_pages, "vision_roster")
+    ocr_reference_text = build_ocr_reference_text(
+        rendered_pages,
+        "vision_roster",
+        session=session,
+        exam_id=exam.id,
+    )
     if ocr_reference_text:
         logger.info(
             "Roster OCR reference built exam_id=%s pages=%s chars=%s duration_seconds=%.2f",

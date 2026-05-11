@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
+import { BadCaseReportButton } from '../components/BadCaseReportButton'
 import { PreviewPanel } from '../components/PreviewPanel'
 import { SectionCard } from '../components/SectionCard'
 import { StatusBadge } from '../components/StatusBadge'
@@ -425,6 +426,17 @@ export function SubmissionReviewPage() {
               activeIndex={selectedPageIndex}
               onChange={setSelectedPageIndex}
             />
+            {pages[selectedPageIndex] ? (
+              <div className="flex justify-end">
+                <BadCaseReportButton
+                  imageStoragePath={pages[selectedPageIndex].storagePath}
+                  routeKey="vision_student_extraction"
+                  examId={submission.exam_id}
+                  submissionId={submission.id}
+                  compact
+                />
+              </div>
+            ) : null}
           </div>
 
           <div className="space-y-6 min-w-0">

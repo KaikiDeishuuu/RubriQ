@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 
 import { AppShell } from './components/AppShell'
 import { ProtectedRoute } from './components/ProtectedRoute'
+import { BadCasesPage } from './pages/BadCasesPage'
 import { BatchResultsPage } from './pages/BatchResultsPage'
 import { CreateExamPage } from './pages/CreateExamPage'
 import { ExamListPage } from './pages/ExamListPage'
@@ -25,6 +26,7 @@ export default function App() {
         <Route path="/" element={<Navigate to="/exams" replace />} />
         <Route path="/exams" element={<ExamListPage />} />
         <Route path="/exams/new" element={<CreateExamPage />} />
+        <Route path="/badcases" element={<BadCasesPage />} />
         <Route path="/exams/:examId/rubric" element={<RubricReviewPage />} />
         <Route path="/exams/:examId/roster" element={<RosterPage />} />
         <Route path="/exams/:examId/submissions" element={<SubmissionUploadPage />} />

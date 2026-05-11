@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, JSON, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin
@@ -103,6 +104,40 @@ class BatchPage(Base, TimestampMixin):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     batch: Mapped[SubmissionBatch] = relationship(back_populates="pages")
+
+
+class OcrBadCase(Base, TimestampMixin):
+    __tablename__ = "ocr_bad_cases"
+    __table_args__ = (
+        UniqueConstraint("image_hash", "route_key", name="uq_ocr_bad_cases_image_route"),
+        Index("ix_ocr_bad_cases_status", "status"),
+        Index("ix_ocr_bad_cases_route_key", "route_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    route_key: Mapped[str] = mapped_column(String(50), nullable=False)
+    exam_id: Mapped[int | None] = mapped_column(ForeignKey("exams.id", ondelete="SET NULL"), nullable=True)
+    submission_id: Mapped[int | None] = mapped_column(ForeignKey("submissions.id", ondelete="SET NULL"), nullable=True)
+    batch_id: Mapped[int | None] = mapped_column(ForeignKey("submission_batches.id", ondelete="SET NULL"), nullable=True)
+    batch_page_id: Mapped[int | None] = mapped_column(ForeignKey("batch_pages.id", ondelete="SET NULL"), nullable=True)
+    image_storage_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    image_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    ocr_model: Mapped[str] = mapped_column(String(255), nullable=False)
+    ocr_raw_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    ocr_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    trigger_reason: Mapped[str] = mapped_column(String(50), nullable=False)
+    trigger_source: Mapped[str] = mapped_column(String(20), nullable=False)
+    reporter_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ground_truth_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    redact_pii: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    exported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    exam: Mapped[Exam | None] = relationship()
+    submission: Mapped["Submission | None"] = relationship()
+    batch: Mapped[SubmissionBatch | None] = relationship()
+    batch_page: Mapped[BatchPage | None] = relationship()
 
 
 class BatchSplitCandidate(Base, TimestampMixin):

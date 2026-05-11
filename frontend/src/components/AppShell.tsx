@@ -7,6 +7,7 @@ import { toClassNames } from '../lib/format'
 const navItems = [
   { to: '/exams', label: '考试列表' },
   { to: '/exams/new', label: '新建考试' },
+  { to: '/badcases', label: 'OCR Bad Cases' },
 ]
 
 export function AppShell() {
