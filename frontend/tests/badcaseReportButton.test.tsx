@@ -16,7 +16,7 @@ const html = renderToStaticMarkup(
 
 assert.match(html, /报告 OCR/)
 assert.match(html, /学生答题识别/)
-assert.match(html, /rendered\/submissions\/1\/pages\/page-001\.png/)
+assert.doesNotMatch(html, /rendered\/submissions\/1\/pages\/page-001\.png/)
 
 const labelledHtml = renderToStaticMarkup(
   <BadCaseReportButton
@@ -40,5 +40,8 @@ const openHtml = renderToStaticMarkup(
 )
 
 assert.match(openHtml, /报告 OCR Bad Case/)
-assert.doesNotMatch(openHtml, /fixed inset-0/)
-assert.match(openHtml, /absolute left-0 top-full/)
+assert.match(openHtml, /当前页面图像/)
+assert.doesNotMatch(openHtml, /rendered\/exams\/3\/rubric\/9\/page-001\.png/)
+assert.match(openHtml, /fixed inset-0 z-40/)
+assert.match(openHtml, /absolute left-0 top-full z-50/)
+assert.doesNotMatch(openHtml, /bg-ink-950\/50/)

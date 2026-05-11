@@ -71,57 +71,60 @@ export function BadCaseReportButton({
             ? 'border border-sage-200 bg-sage-50 text-sage-500'
             : 'border border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100',
         )}
-        title={`${formatBadCaseRoute(routeKey)} · ${imageStoragePath}`}
+        title={formatBadCaseRoute(routeKey)}
       >
         {reported ? '已上报' : label}
       </button>
 
       {open ? (
-        <form onSubmit={handleSubmit} className="absolute left-0 top-full z-40 mt-2 w-[min(28rem,calc(100vw-2rem))] rounded-3xl border border-ink-900/10 bg-white p-5 text-left shadow-lift">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <h2 className="font-display text-xl text-ink-950">报告 OCR Bad Case</h2>
-              <p className="mt-1 text-sm text-ink-700">{formatBadCaseRoute(routeKey)}</p>
+        <>
+          <button type="button" aria-label="关闭 OCR Bad Case 报告" className="fixed inset-0 z-40 cursor-default" onClick={() => setOpen(false)} />
+          <form onSubmit={handleSubmit} className="absolute left-0 top-full z-50 mt-2 w-[min(28rem,calc(100vw-2rem))] rounded-3xl border border-ink-900/10 bg-white p-5 text-left shadow-lift">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 className="font-display text-xl text-ink-950">报告 OCR Bad Case</h2>
+                <p className="mt-1 text-sm text-ink-700">{formatBadCaseRoute(routeKey)}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                className="rounded-full border border-ink-900/10 bg-white px-3 py-1.5 text-xs font-semibold text-ink-950 transition hover:bg-paper"
+              >
+                关闭
+              </button>
             </div>
-            <button
-              type="button"
-              onClick={() => setOpen(false)}
-              className="rounded-full border border-ink-900/10 bg-white px-3 py-1.5 text-xs font-semibold text-ink-950 transition hover:bg-paper"
-            >
-              关闭
-            </button>
-          </div>
-          <p className="mt-4 break-all rounded-2xl border border-ink-900/10 bg-paper px-4 py-3 text-xs text-ink-700">
-            {imageStoragePath}
-          </p>
-          <label className="mt-4 block">
-            <span className="text-sm font-semibold text-ink-800">问题说明</span>
-            <textarea
-              value={note}
-              onChange={(event) => setNote(event.target.value)}
-              rows={4}
-              className="mt-2 w-full rounded-2xl border border-ink-900/10 bg-white px-4 py-3 text-sm leading-6 text-ink-950 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
-              placeholder="例如：姓名识别错误、整页 OCR 为空、题号区域漏识别。"
-            />
-          </label>
-          {error ? <p className="mt-3 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</p> : null}
-          <div className="mt-5 flex justify-end gap-2">
-            <button
-              type="button"
-              onClick={() => setOpen(false)}
-              className="rounded-full border border-ink-900/10 bg-white px-4 py-2 text-sm font-semibold text-ink-950 transition hover:bg-paper"
-            >
-              取消
-            </button>
-            <button
-              type="submit"
-              disabled={saving}
-              className="rounded-full bg-ink-950 px-4 py-2 text-sm font-semibold text-paper transition hover:bg-ink-800 disabled:opacity-50"
-            >
-              {saving ? '正在上报...' : '提交上报'}
-            </button>
-          </div>
-        </form>
+            <p className="mt-4 rounded-2xl border border-ink-900/10 bg-paper px-4 py-3 text-xs text-ink-700">
+              当前页面图像
+            </p>
+            <label className="mt-4 block">
+              <span className="text-sm font-semibold text-ink-800">问题说明</span>
+              <textarea
+                value={note}
+                onChange={(event) => setNote(event.target.value)}
+                rows={4}
+                className="mt-2 w-full rounded-2xl border border-ink-900/10 bg-white px-4 py-3 text-sm leading-6 text-ink-950 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
+                placeholder="例如：姓名识别错误、整页 OCR 为空、题号区域漏识别。"
+              />
+            </label>
+            {error ? <p className="mt-3 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</p> : null}
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                className="rounded-full border border-ink-900/10 bg-white px-4 py-2 text-sm font-semibold text-ink-950 transition hover:bg-paper"
+              >
+                取消
+              </button>
+              <button
+                type="submit"
+                disabled={saving}
+                className="rounded-full bg-ink-950 px-4 py-2 text-sm font-semibold text-paper transition hover:bg-ink-800 disabled:opacity-50"
+              >
+                {saving ? '正在上报...' : '提交上报'}
+              </button>
+            </div>
+          </form>
+        </>
       ) : null}
     </div>
   )
