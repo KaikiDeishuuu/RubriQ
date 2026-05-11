@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 
+import { SectionCard } from '../src/components/SectionCard'
+
 import { BadCaseReportButton } from '../src/components/BadCaseReportButton'
 
 const html = renderToStaticMarkup(
@@ -39,10 +41,23 @@ const openHtml = renderToStaticMarkup(
   />,
 )
 
-assert.match(openHtml, /报告 OCR Bad Case/)
-assert.match(openHtml, /当前页面图像/)
+assert.match(openHtml, /报告 OCR/)
+assert.doesNotMatch(openHtml, /报告 OCR Bad Case/)
+assert.doesNotMatch(openHtml, /当前页面图像/)
 assert.doesNotMatch(openHtml, /rendered\/exams\/3\/rubric\/9\/page-001\.png/)
-assert.match(openHtml, /fixed inset-0 z-50/)
-assert.match(openHtml, /fixed z-\[60\]/)
+assert.doesNotMatch(openHtml, /fixed z-\[60\]/)
 assert.doesNotMatch(openHtml, /absolute left-0 top-full/)
-assert.doesNotMatch(openHtml, /bg-ink-950\/50/)
+assert.doesNotMatch(openHtml, /style="left:/)
+
+const nestedHtml = renderToStaticMarkup(
+  <SectionCard title="上传并解析">
+    <BadCaseReportButton
+      imageStoragePath="rendered/exams/3/rubric/9/page-001.png"
+      routeKey="vision_rubric"
+      examId={3}
+      initialOpen
+    />
+  </SectionCard>,
+)
+
+assert.doesNotMatch(nestedHtml, /报告 OCR Bad Case/)

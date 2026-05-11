@@ -1,4 +1,5 @@
-import React, { FormEvent, useRef, useState } from 'react'
+import React, { FormEvent, useState } from 'react'
+import { createPortal } from 'react-dom'
 
 import { createBadCase } from '../lib/api'
 import { formatBadCaseRoute } from '../lib/badcases'
@@ -28,21 +29,69 @@ export function BadCaseReportButton({
   label = '报告 OCR',
   initialOpen = false,
 }: BadCaseReportButtonProps) {
-  const triggerRef = useRef<HTMLButtonElement>(null)
   const [open, setOpen] = useState(initialOpen)
-  const [popoverPosition, setPopoverPosition] = useState<{ left: number; top: number } | null>(null)
   const [note, setNote] = useState('')
   const [saving, setSaving] = useState(false)
   const [reported, setReported] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   function openPopover() {
-    const rect = triggerRef.current?.getBoundingClientRect()
-    if (rect) {
-      setPopoverPosition({ left: Math.max(16, Math.min(rect.left, window.innerWidth - 464)), top: rect.bottom + 8 })
-    }
     setOpen(true)
   }
+
+  const modal = open ? (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+      <button type="button" aria-label="关闭 OCR Bad Case 报告" className="absolute inset-0 cursor-default bg-ink-950/20" onClick={() => setOpen(false)} />
+      <form
+        onSubmit={handleSubmit}
+        className="relative w-full max-w-md rounded-3xl border border-ink-900/10 bg-white p-5 text-left shadow-lift"
+      >
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 className="font-display text-xl text-ink-950">报告 OCR Bad Case</h2>
+            <p className="mt-1 text-sm text-ink-700">{formatBadCaseRoute(routeKey)}</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setOpen(false)}
+            className="rounded-full border border-ink-900/10 bg-white px-3 py-1.5 text-xs font-semibold text-ink-950 transition hover:bg-paper"
+          >
+            关闭
+          </button>
+        </div>
+        <p className="mt-4 rounded-2xl border border-ink-900/10 bg-paper px-4 py-3 text-xs text-ink-700">
+          当前页面图像
+        </p>
+        <label className="mt-4 block">
+          <span className="text-sm font-semibold text-ink-800">问题说明</span>
+          <textarea
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+            rows={4}
+            className="mt-2 w-full rounded-2xl border border-ink-900/10 bg-white px-4 py-3 text-sm leading-6 text-ink-950 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
+            placeholder="例如：姓名识别错误、整页 OCR 为空、题号区域漏识别。"
+          />
+        </label>
+        {error ? <p className="mt-3 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</p> : null}
+        <div className="mt-5 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={() => setOpen(false)}
+            className="rounded-full border border-ink-900/10 bg-white px-4 py-2 text-sm font-semibold text-ink-950 transition hover:bg-paper"
+          >
+            取消
+          </button>
+          <button
+            type="submit"
+            disabled={saving}
+            className="rounded-full bg-ink-950 px-4 py-2 text-sm font-semibold text-paper transition hover:bg-ink-800 disabled:opacity-50"
+          >
+            {saving ? '正在上报...' : '提交上报'}
+          </button>
+        </div>
+      </form>
+    </div>
+  ) : null
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -71,7 +120,6 @@ export function BadCaseReportButton({
   return (
     <div className="relative inline-flex">
       <button
-        ref={triggerRef}
         type="button"
         onClick={openPopover}
         disabled={saving || reported}
@@ -87,60 +135,7 @@ export function BadCaseReportButton({
         {reported ? '已上报' : label}
       </button>
 
-      {open ? (
-        <>
-          <button type="button" aria-label="关闭 OCR Bad Case 报告" className="fixed inset-0 z-50 cursor-default" onClick={() => setOpen(false)} />
-          <form
-            onSubmit={handleSubmit}
-            className="fixed z-[60] w-[min(28rem,calc(100vw-2rem))] rounded-3xl border border-ink-900/10 bg-white p-5 text-left shadow-lift"
-            style={{ left: popoverPosition?.left ?? 16, top: popoverPosition?.top ?? 80 }}
-          >
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <h2 className="font-display text-xl text-ink-950">报告 OCR Bad Case</h2>
-                <p className="mt-1 text-sm text-ink-700">{formatBadCaseRoute(routeKey)}</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setOpen(false)}
-                className="rounded-full border border-ink-900/10 bg-white px-3 py-1.5 text-xs font-semibold text-ink-950 transition hover:bg-paper"
-              >
-                关闭
-              </button>
-            </div>
-            <p className="mt-4 rounded-2xl border border-ink-900/10 bg-paper px-4 py-3 text-xs text-ink-700">
-              当前页面图像
-            </p>
-            <label className="mt-4 block">
-              <span className="text-sm font-semibold text-ink-800">问题说明</span>
-              <textarea
-                value={note}
-                onChange={(event) => setNote(event.target.value)}
-                rows={4}
-                className="mt-2 w-full rounded-2xl border border-ink-900/10 bg-white px-4 py-3 text-sm leading-6 text-ink-950 outline-none transition focus:border-slateBlue-300 focus:ring-2 focus:ring-slateBlue-100"
-                placeholder="例如：姓名识别错误、整页 OCR 为空、题号区域漏识别。"
-              />
-            </label>
-            {error ? <p className="mt-3 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">{error}</p> : null}
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setOpen(false)}
-                className="rounded-full border border-ink-900/10 bg-white px-4 py-2 text-sm font-semibold text-ink-950 transition hover:bg-paper"
-              >
-                取消
-              </button>
-              <button
-                type="submit"
-                disabled={saving}
-                className="rounded-full bg-ink-950 px-4 py-2 text-sm font-semibold text-paper transition hover:bg-ink-800 disabled:opacity-50"
-              >
-                {saving ? '正在上报...' : '提交上报'}
-              </button>
-            </div>
-          </form>
-        </>
-      ) : null}
+      {modal && typeof document !== 'undefined' ? createPortal(modal, document.body) : null}
     </div>
   )
 }
